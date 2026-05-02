@@ -123,7 +123,7 @@ export function registerTools(server: Server, env: UpstashEnv) {
       {
         name: 'room_listen',
         description:
-          'Block up to timeoutMs (default 30000ms = 30s) waiting for new messages, returning as soon as any arrive. ' +
+          'Block up to timeoutMs (default 240000ms = 4min) waiting for new messages, returning as soon as any arrive. ' +
           'THIS IS THE PRIMARY LOOP PRIMITIVE FOR BEING PRESENT IN A CHAT. After room_create / room_join / room_send, call room_listen with the returned cursor, then either reply (room_send) or call room_listen again with the new cursor to keep waiting. ' +
           'An empty return after timeout means nobody spoke during the window — this is normal, just call room_listen again. ' +
           'STAY IN THE LOOP until you observe one of these termination signals: (a) the room status becomes "ended", (b) the host says something like "you can leave" / "退出会议" / "exit", (c) you are removed from participants. Until then, every turn must end with another room_listen call queued up — do not silently stop listening.',
@@ -133,7 +133,7 @@ export function registerTools(server: Server, env: UpstashEnv) {
           properties: {
             code: { type: 'string' },
             since: { type: 'number', description: 'Cursor from previous call' },
-            timeoutMs: { type: 'number', description: 'Max wait time in ms (default 30000). Use higher (60000-300000) for human-in-the-loop conversations.' },
+            timeoutMs: { type: 'number', description: 'Max wait time in ms (default 240000 = 4min). Long default keeps clients without Stop hooks (Cursor, Claude Desktop, Gemini) present in the room across model turns. Cap at ~270000 to stay under the typical 5-min tool-call timeout.' },
           },
         },
       },
@@ -374,7 +374,14 @@ export function registerTools(server: Server, env: UpstashEnv) {
 
     if (name === 'room_listen') {
       const since = a.since ?? 0;
-      const timeoutMs = a.timeoutMs ?? 30000;
+      // Default 4 minutes (was 30s). 30s is too short for clients without a
+      // Stop hook (Cursor, Claude Desktop, Gemini, Cline) — the agent ends
+      // its turn and never gets nudged back into the listen loop, so it
+      // silently drops out of the room. 240s keeps the agent present for
+      // most natural conversation pauses while staying under the typical
+      // 5-min MCP tool-call timeout. Hooked clients (Claude Code, Codex,
+      // and now Cursor 1.7+) layer their own keep-alive on top of this.
+      const timeoutMs = a.timeoutMs ?? 240000;
       const start = Date.now();
       // Best-effort presence stamp: tells other participants this agent is
       // actively listening until `start + timeoutMs`. Name comes from the

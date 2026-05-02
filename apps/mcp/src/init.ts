@@ -153,18 +153,53 @@ async function installClaudeDesktop(): Promise<InstallResult> {
   return result;
 }
 
-async function installCursor(): Promise<InstallResult> {
-  const path = join(homedir(), '.cursor', 'mcp.json');
-  const data = (await readJson(path)) ?? {};
+async function installCursor(opts: { hooks: boolean }): Promise<InstallResult> {
+  const result: InstallResult = { changes: [], unchanged: [] };
+
+  // Step 1: register the MCP server in ~/.cursor/mcp.json (same shape as
+  // Claude Code / Claude Desktop / Cline).
+  const mcpPath = join(homedir(), '.cursor', 'mcp.json');
+  const data = (await readJson(mcpPath)) ?? {};
   const servers = ((data.mcpServers as Record<string, unknown>) ?? {});
-  const before = JSON.stringify(servers['agent-room']);
+  const beforeServers = JSON.stringify(servers['agent-room']);
   servers['agent-room'] = MCP_ENTRY;
   data.mcpServers = servers;
-  if (JSON.stringify(servers['agent-room']) !== before) {
-    await writeJsonAtomic(path, data);
-    return { changes: [`wrote ${path} (agent-room MCP server)`], unchanged: [] };
+  if (JSON.stringify(servers['agent-room']) !== beforeServers) {
+    await writeJsonAtomic(mcpPath, data);
+    result.changes.push(`wrote ${mcpPath} (agent-room MCP server)`);
+  } else {
+    result.unchanged.push(`${mcpPath} (already configured)`);
   }
-  return { changes: [], unchanged: [`${path} (already configured)`] };
+
+  // Step 2: optionally install the Cursor 1.7+ `stop` hook in
+  // ~/.cursor/hooks.json. Cursor's stop-hook schema is shaped:
+  //   { "version": 1, "hooks": { "stop": [{ command, loop_limit }, ...] } }
+  // where the hook command receives `{ status, loop_count }` on stdin and
+  // can write `{ followup_message }` to stdout to enqueue the next user
+  // message — that's what keeps the agent in the room_listen loop. Without
+  // this hook, Cursor agents drop out of rooms the moment their turn ends.
+  // `loop_limit: null` lets our own MAX_BLOCKS_PER_CYCLE cap (in hook.ts)
+  // be the durable backstop.
+  if (opts.hooks) {
+    const hooksPath = join(homedir(), '.cursor', 'hooks.json');
+    const existing = (await readJson(hooksPath)) ?? {};
+    const hooksObj = ((existing.hooks as Record<string, unknown>) ?? {});
+    const stopList = Array.isArray(hooksObj.stop) ? [...(hooksObj.stop as unknown[])] : [];
+    const alreadyInstalled = stopList.some((h: any) => h?.command === HOOK_COMMAND);
+    if (!alreadyInstalled) {
+      stopList.push({ command: HOOK_COMMAND, loop_limit: null });
+      hooksObj.stop = stopList;
+      existing.hooks = hooksObj;
+      // Cursor docs require `version: 1` at the top level.
+      if (existing.version !== 1) existing.version = 1;
+      await writeJsonAtomic(hooksPath, existing);
+      result.changes.push(`wrote ${hooksPath} (stop hook for autonomous chat)`);
+    } else {
+      result.unchanged.push(`${hooksPath} (stop hook already installed)`);
+    }
+  }
+
+  return result;
 }
 
 // Gemini CLI uses ~/.gemini/settings.json with the same `mcpServers` shape
@@ -288,8 +323,17 @@ function printConfigs() {
   console.log(mcp);
   console.log('\nNote: Claude Desktop supports MCP tools, but not Claude Code hooks. Use room_listen for live room messages.');
 
-  console.log('\n--- Cursor / Windsurf / Cline ---');
-  console.log('~/.cursor/mcp.json (or equivalent):');
+  console.log('\n--- Cursor (1.7+) ---');
+  console.log('~/.cursor/mcp.json:');
+  console.log(mcp);
+  console.log('\n~/.cursor/hooks.json (for autonomous chat — keeps agent in room_listen loop):');
+  console.log(JSON.stringify({
+    version: 1,
+    hooks: { stop: [{ command: HOOK_COMMAND, loop_limit: null }] },
+  }, null, 2));
+
+  console.log('\n--- Windsurf ---');
+  console.log('~/.codeium/windsurf/mcp_config.json (or equivalent):');
   console.log(mcp);
 
   console.log('\n--- Gemini CLI ---');
@@ -350,7 +394,7 @@ export async function runInit(argv: string[]): Promise<void> {
     console.log('Where to install?');
     console.log('  1. Claude Code   (default — adds MCP server + autonomous-chat hooks)');
     console.log('  2. Claude Desktop (MCP server only — use room_listen for live chat)');
-    console.log('  3. Cursor');
+    console.log('  3. Cursor          (Cursor 1.7+: adds MCP server + stop hook)');
     console.log('  4. Codex CLI     (adds MCP server + hooks)');
     console.log('  5. Gemini CLI');
     console.log('  6. Cline (VS Code extension)');
@@ -373,8 +417,11 @@ export async function runInit(argv: string[]): Promise<void> {
   }
 
   if (target === 'cursor') {
-    const result = await installCursor();
+    const result = await installCursor({ hooks: !noHooks });
     reportResult('Cursor', result);
+    if (noHooks) {
+      console.log('  (skipped hooks; pass without --no-hooks for autonomous chat — Cursor 1.7+ required)');
+    }
     nextSteps('Cursor');
     return;
   }

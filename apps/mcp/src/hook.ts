@@ -16,18 +16,46 @@ const POLL_MAX_MS = 30_000;
 const POLL_INTERVAL_MS = 1_500;
 
 // How many CONSECUTIVE no-message blocks we issue before letting the agent
-// actually stop. Each block runs for up to POLL_MAX_MS, so 12 × 30s = 6 min
+// actually stop. Each block runs for up to POLL_MAX_MS, so 60 × 30s = 30 min
 // of guaranteed presence after the agent's last meaningful action. The
 // streak resets whenever a real message arrives (productive activity is
 // not penalized) and on UserPromptSubmit. This is the practical bound on
 // how long an idle agent stays "listening" after a quiet stretch.
-const MAX_BLOCKS_PER_CYCLE = 12;
+//
+// Was 12 (= 6 min). Raised to 60 because users running long meetings
+// reported agents disappearing 6 minutes in during a natural pause; the
+// fixed cap was the bottleneck, not the user's instruction. Override by
+// setting AGENT_ROOM_MAX_BLOCKS in the environment.
+const MAX_BLOCKS_PER_CYCLE = (() => {
+  const fromEnv = parseInt(process.env.AGENT_ROOM_MAX_BLOCKS ?? '', 10);
+  return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : 60;
+})();
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// Two clients funnel into this hook today:
+//
+// - Claude Code / Codex CLI: send `hook_event_name` ∈ { Stop, UserPromptSubmit,
+//   SessionStart } and expect `{ decision: "block", reason }` to keep the
+//   turn open, or `{ hookSpecificOutput: { ... } }` for context injection.
+//
+// - Cursor 1.7+: sends `{ status, loop_count }` (no `hook_event_name`) on
+//   the `stop` event and expects `{ followup_message }` to enqueue the next
+//   user message; an empty/omitted body means "let the turn end".
+//
+// We detect the shape and emit the right response per client.
 interface HookInput {
+  // Claude Code / Codex CLI
   hook_event_name?: string;
   stop_hook_active?: boolean;
+  // Cursor 1.7+ stop hook
+  status?: 'completed' | 'aborted' | 'error';
+  loop_count?: number;
+  conversation_id?: string;
+}
+
+function isCursorStopInput(input: HookInput): boolean {
+  return input.hook_event_name === undefined && typeof input.status === 'string';
 }
 
 interface PendingRoom {
@@ -128,7 +156,22 @@ async function readStdin(): Promise<HookInput> {
 
 export async function runHook(env: UpstashEnv): Promise<void> {
   const input = await readStdin();
-  const event = input.hook_event_name ?? 'Stop';
+  const cursorMode = isCursorStopInput(input);
+  // Normalize the event name across clients. Cursor only fires the stop
+  // hook (no UserPromptSubmit / SessionStart equivalent today), so we
+  // collapse its `status` into our internal "Stop" event for the rest of
+  // the pipeline. Claude Code / Codex still send their own event name.
+  // An empty stdin payload (e.g. manual test invocation) falls through to
+  // a no-op — we used to default to 'Stop' which could trigger phantom
+  // long-polls; now we only act when we actually got an event.
+  let event: string;
+  if (cursorMode) {
+    event = 'Stop';
+  } else if (input.hook_event_name) {
+    event = input.hook_event_name;
+  } else {
+    process.exit(0);
+  }
 
   // User typed something — fresh turn cycle. Reset the block streak so the
   // next Stop hook can block fresh up to MAX_BLOCKS_PER_CYCLE times.
@@ -139,12 +182,18 @@ export async function runHook(env: UpstashEnv): Promise<void> {
   // Cap the autonomous block-continue chain. We DO allow continuing past
   // stop_hook_active=true (so two agents can chat back-and-forth without the
   // user having to retype), but we cap at MAX_BLOCKS_PER_CYCLE to ensure
-  // there's always an exit. UserPromptSubmit resets the counter.
-  if (event === 'Stop' && input.stop_hook_active === true) {
+  // there's always an exit. UserPromptSubmit (Claude Code) and the Cursor
+  // loop_count reset on user input both feed into the same logic.
+  // For Cursor, `loop_count` is server-side; we still respect our own
+  // streak cap as the durable backstop. (Cursor's own `loop_limit: null`
+  // makes it unlimited from Cursor's side, so this cap is what actually
+  // bounds the chain.)
+  if (event === 'Stop' && (input.stop_hook_active === true || cursorMode)) {
     const state = await readState();
     if ((state.blockStreak ?? 0) >= MAX_BLOCKS_PER_CYCLE) {
-      // Reached the cap — let Claude actually stop. Future user input
-      // resets the counter via the UserPromptSubmit branch above.
+      // Reached the cap — let the agent actually stop. Future user input
+      // resets the counter via the UserPromptSubmit branch above (CC) or
+      // the next user message in Cursor (loop_count resets to 0).
       try { await resetBlockStreak(); } catch { /* non-essential */ }
       process.exit(0);
     }
@@ -188,7 +237,15 @@ export async function runHook(env: UpstashEnv): Promise<void> {
   if (withMessages.length > 0 && event === 'Stop') {
     try { await resetBlockStreak(); } catch { /* non-essential */ }
     const text = formatMessages(withMessages);
-    process.stdout.write(JSON.stringify({ decision: 'block', reason: text }));
+    if (cursorMode) {
+      // Cursor expects `{ followup_message }` and submits it as the next
+      // user message. The text already explains the messages and asks the
+      // agent to call room_send / room_listen, which is exactly what we
+      // want as a follow-up.
+      process.stdout.write(JSON.stringify({ followup_message: text }));
+    } else {
+      process.stdout.write(JSON.stringify({ decision: 'block', reason: text }));
+    }
     process.exit(0);
   }
 
@@ -235,7 +292,12 @@ export async function runHook(env: UpstashEnv): Promise<void> {
       }
       lines.push('');
       lines.push('After the listen returns, decide: reply with room_send (and queue another room_listen), or call room_listen again to keep waiting. The only valid reasons to stop are: room ended, you were removed from participants, or the host explicitly said you can leave.');
-      process.stdout.write(JSON.stringify({ decision: 'block', reason: lines.join('\n') }));
+      const text = lines.join('\n');
+      if (cursorMode) {
+        process.stdout.write(JSON.stringify({ followup_message: text }));
+      } else {
+        process.stdout.write(JSON.stringify({ decision: 'block', reason: text }));
+      }
       process.exit(0);
     }
     process.exit(0);
