@@ -7,7 +7,7 @@ import { MeetingCodePill } from '../components/MeetingCodePill.js';
 import { Avatar } from '../components/Avatar.js';
 import { AgentRoomLogo } from '../components/AgentRoomLogo.js';
 import { colorForName, initialsFor } from '../lib/colors.js';
-import { PRESENCE_STALE_MS, artifactLabel, extractArtifacts, type ArtifactKind, type Message, type MessageAttachment, type Participant, type RoomArtifact } from '@agent-room/shared';
+import { PRESENCE_STALE_MS, PRESENCE_DISCONNECTED_MS, artifactLabel, extractArtifacts, type ArtifactKind, type Message, type MessageAttachment, type Participant, type RoomArtifact } from '@agent-room/shared';
 import { setMuted, createClient, createRoomReport, endRoom as endRoomApi, reactivateRoom as reactivateRoomApi, removeParticipant } from '@agent-room/upstash-client';
 import { ENV } from '../env.js';
 import { copyText } from '../lib/copy.js';
@@ -449,7 +449,7 @@ export function Room() {
             <div className="flex-1 overflow-y-auto p-4">
               <div className="text-[10px] font-semibold uppercase text-ink-faint mb-1">Participants</div>
               <p className="mb-3 text-[10px] leading-relaxed text-ink-soft">
-                Listening means the agent is inside a current listen window. Other agent states may still depend on local hooks.
+                Listening = inside an active listen window. Disconnected = no heartbeat for 5+ min, likely the CLI session was killed without leaving cleanly — host can remove with the × button.
               </p>
               <div className="space-y-2">
                 {room.participants.map(p => {
@@ -459,11 +459,20 @@ export function Room() {
                   const isMuted = p.canSpeak === false;
                   const canMuteToggle = isMeHost && !isSelf && !ended;
                   const presence = participantPresence(p, now);
+                  // Whole-row visual fade for participants who haven't been
+                  // seen in a while — keeps the row legible but signals
+                  // "probably gone" without screaming about it.
+                  const rowFade = presence.kind === 'idle'
+                    ? 'opacity-65'
+                    : presence.kind === 'disconnected'
+                      ? 'opacity-50'
+                      : '';
                   return (
-                    <div key={`${p.name}-${p.client}`} className={`group flex items-center gap-2 rounded-lg border px-2.5 py-2 ${isMuted ? 'border-amber-300 bg-amber-50/60' : 'border-border-faint bg-surface-softer'}`}>
-                      <div className={presence.kind === 'idle' ? 'opacity-45' : ''}>
-                        <Avatar initials={p.initials} color={p.color} size="sm" />
-                      </div>
+                    <div
+                      key={`${p.name}-${p.client}`}
+                      className={`flex items-center gap-2 rounded-lg border px-2.5 py-2 transition ${rowFade} ${isMuted ? 'border-amber-300 bg-amber-50/60' : 'border-border-faint bg-surface-softer'}`}
+                    >
+                      <Avatar initials={p.initials} color={p.color} size="sm" />
                       <div className="min-w-0 flex-1">
                         <div className="text-xs font-semibold truncate flex items-center gap-1 flex-wrap">
                           {p.name}
@@ -479,25 +488,53 @@ export function Room() {
                           {presence.detail && <span className="text-ink-faint">· {presence.detail}</span>}
                         </div>
                       </div>
-                      {canMuteToggle && (
-                        <button
-                          onClick={() => handleToggleMute({ name: p.name, client: p.client, canSpeak: p.canSpeak })}
-                          title={isMuted ? `Unmute ${p.name}` : `Mute ${p.name}`}
-                          className={`text-[10px] font-semibold px-2 h-6 rounded transition ${isMuted
-                            ? 'text-emerald-700 bg-emerald-100 hover:bg-emerald-200'
-                            : 'opacity-0 group-hover:opacity-100 focus:opacity-100 text-amber-700 bg-amber-100 hover:bg-amber-200'}`}
-                        >
-                          {isMuted ? '🔊 Unmute' : '🔇 Mute'}
-                        </button>
-                      )}
-                      {canKick && (
-                        <button
-                          onClick={() => handleKick({ name: p.name, client: p.client })}
-                          title={`Remove ${p.name}`}
-                          className="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] font-semibold text-red-600 hover:bg-red-50 w-6 h-6 rounded transition"
-                        >
-                          ×
-                        </button>
+                      {/*
+                        Host controls — always visible (no hover-to-reveal).
+                        Hover-only buttons hid the kick action so badly that
+                        a user reported "the delete agent button isn't
+                        obvious" and "the mute button feels cramped". Keep
+                        them quiet visually (low contrast, neutral border)
+                        but always discoverable, and only render at all when
+                        the viewer is actually the host.
+                      */}
+                      {(canMuteToggle || canKick) && (
+                        <div className="flex items-center gap-1">
+                          {canMuteToggle && (
+                            <button
+                              onClick={() => handleToggleMute({ name: p.name, client: p.client, canSpeak: p.canSpeak })}
+                              title={isMuted ? `Unmute ${p.name}` : `Mute ${p.name}`}
+                              aria-label={isMuted ? `Unmute ${p.name}` : `Mute ${p.name}`}
+                              className={`flex h-7 w-7 items-center justify-center rounded-md border text-[11px] transition ${isMuted
+                                ? 'border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                                : 'border-border-faint bg-surface text-ink-soft hover:border-amber-300 hover:bg-amber-50 hover:text-amber-700'}`}
+                            >
+                              {/* Speaker glyph: solid when can speak, slashed when muted. */}
+                              {isMuted ? (
+                                <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                  <path d="M8 3.5 4.5 6.25H2.5v3.5h2L8 12.5z" />
+                                  <path d="m11 6 3 4M14 6l-3 4" />
+                                </svg>
+                              ) : (
+                                <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                  <path d="M8 3.5 4.5 6.25H2.5v3.5h2L8 12.5z" />
+                                  <path d="M11 5.75c.75.6 1.25 1.4 1.25 2.25s-.5 1.65-1.25 2.25" />
+                                </svg>
+                              )}
+                            </button>
+                          )}
+                          {canKick && (
+                            <button
+                              onClick={() => handleKick({ name: p.name, client: p.client })}
+                              title={`Remove ${p.name}`}
+                              aria-label={`Remove ${p.name}`}
+                              className="flex h-7 w-7 items-center justify-center rounded-md border border-border-faint bg-surface text-ink-soft transition hover:border-red-300 hover:bg-red-50 hover:text-red-600"
+                            >
+                              <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" aria-hidden="true">
+                                <path d="m4 4 8 8M12 4l-8 8" />
+                              </svg>
+                            </button>
+                          )}
+                        </div>
                       )}
                     </div>
                   );
@@ -802,7 +839,7 @@ function artifactTone(kind: ArtifactKind): string {
 function participantPresence(p: Participant, now: number) {
   if (p.listenUntil && p.listenUntil > now) {
     return {
-      kind: 'listening',
+      kind: 'listening' as const,
       label: 'Listening now',
       detail: '',
       className: 'text-emerald-700',
@@ -812,7 +849,7 @@ function participantPresence(p: Participant, now: number) {
 
   if (now - p.lastSeenAt <= PRESENCE_STALE_MS) {
     return {
-      kind: 'online',
+      kind: 'online' as const,
       label: 'Online',
       detail: p.client === 'cc' ? 'hook unknown' : '',
       className: 'text-blue-700',
@@ -820,8 +857,24 @@ function participantPresence(p: Participant, now: number) {
     };
   }
 
+  // Past 5 minutes silent → almost certainly disconnected. Most common cause:
+  // a CLI agent (Cursor / Claude Code / Codex) was terminated by the user
+  // without calling room_leave, so the participant row stays in the room
+  // forever. The "Disconnected" label is a hint to the host that this
+  // participant is unlikely to come back, paired with the always-visible
+  // kick button so they can clean up in one click.
+  if (now - p.lastSeenAt > PRESENCE_DISCONNECTED_MS) {
+    return {
+      kind: 'disconnected' as const,
+      label: 'Disconnected',
+      detail: p.client === 'cc' ? 'host can remove' : '',
+      className: 'text-ink-faint',
+      dotClassName: 'bg-slate-400',
+    };
+  }
+
   return {
-    kind: 'idle',
+    kind: 'idle' as const,
     label: 'Idle',
     detail: p.client === 'cc' ? 'not listening' : '',
     className: 'text-ink-faint',

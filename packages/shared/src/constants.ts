@@ -15,6 +15,12 @@ export const MESSAGE_POLL_MS = 3000;
 export const ROOM_POLL_MS = 5000;
 export const HEARTBEAT_MS = 30000;
 export const PRESENCE_STALE_MS = 60000;
+// Past this many ms with no heartbeat AND no active listen window we treat
+// the participant as disconnected — most likely they got killed mid-session
+// without calling room_leave (Cursor / Codex sessions terminated by user
+// just exit, never tell the room they're gone). UI surfaces this so the
+// host can manually remove them.
+export const PRESENCE_DISCONNECTED_MS = 5 * 60 * 1000;
 
 // Avatar palette — indigo/pink/amber/violet/emerald/rose/sky/fuchsia
 export const AVATAR_PALETTE: readonly string[] = [
