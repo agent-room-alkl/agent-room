@@ -17,7 +17,7 @@ import {
   removeParticipant,
   type UpstashEnv,
 } from '@agent-room/upstash-client';
-import { generateCode, AVATAR_PALETTE, roleBriefFor } from '@agent-room/shared';
+import { generateCode, AVATAR_PALETTE, roleBriefFor, normalizeEscapedWhitespace } from '@agent-room/shared';
 import type { Message, Participant } from '@agent-room/shared';
 import { setRoom, removeRoom, updateCursor, markSent, readState } from './state.js';
 
@@ -313,6 +313,16 @@ export function registerTools(server: Server, env: UpstashEnv) {
           role = room.participants.find((p: Participant) => p.name === a.name)?.role ?? '';
         } catch { /* fall through */ }
       }
+      // Cursor's Composer agent (and probably other client subsystems we
+      // haven't seen yet) sometimes JSON.stringify's its own message body
+      // before passing it as the `text` arg, so a real newline arrives as
+      // the 2-character literal "\\n". Without normalization the chat
+      // bubble renders the backslash-n verbatim and the message looks
+      // unformatted. The helper is no-op for well-formed text — it only
+      // unescapes when the input has zero real newlines AND at least one
+      // suspicious escape, so legitimate `\n` literals (e.g. someone
+      // explaining a regex inside a multi-paragraph message) survive.
+      const text = normalizeEscapedWhitespace(a.text);
       const msg: Message = {
         id: Date.now(),
         type: 'msg',
@@ -320,7 +330,7 @@ export function registerTools(server: Server, env: UpstashEnv) {
         initials: initialsFor(a.name),
         color: colorForName(a.name),
         role,
-        text: a.text,
+        text,
         client: 'cc',
         time: Date.now(),
       };

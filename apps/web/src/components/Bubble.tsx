@@ -1,6 +1,7 @@
 import { Avatar } from './Avatar.js';
 import { useMemo, type ReactNode } from 'react';
 import type { Message, MessageAttachment } from '@agent-room/shared';
+import { normalizeEscapedWhitespace } from '@agent-room/shared';
 
 interface Props {
   message: Message;
@@ -80,7 +81,14 @@ function formatBytes(size: number): string {
 }
 
 function MessageText({ text }: { text: string }) {
-  const blocks = useMemo(() => parseBlocks(text), [text]);
+  // Defensively unescape literal `\n` / `\t` sequences before parsing —
+  // some agent clients (Cursor's Composer is the documented offender)
+  // double-escape multi-line bodies before passing them as the `text` arg
+  // to room_send. The MCP server now normalizes on the way in, but
+  // historical messages in active rooms predate that fix; running the
+  // same normalization here at render time makes them readable too.
+  // No-op for well-formed text, see normalizeEscapedWhitespace JSDoc.
+  const blocks = useMemo(() => parseBlocks(normalizeEscapedWhitespace(text)), [text]);
 
   return (
     <div className="space-y-2">

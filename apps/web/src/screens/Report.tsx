@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import { artifactLabel, extractArtifacts, type ArtifactKind, type RoomArtifact, type RoomReport } from '@agent-room/shared';
+import { artifactLabel, extractArtifacts, normalizeEscapedWhitespace, type ArtifactKind, type RoomArtifact, type RoomReport } from '@agent-room/shared';
 import { createClient, createRoomReport, getRoom, getRoomReport, listMessages } from '@agent-room/upstash-client';
 import { ENV } from '../env.js';
 
@@ -171,7 +171,7 @@ export function Report() {
                   {m.role && <span> · {m.role}</span>}
                   <span> · {new Date(m.time).toLocaleString()}</span>
                 </div>
-                <p className="whitespace-pre-wrap text-sm leading-relaxed">{m.text}</p>
+                <p className="whitespace-pre-wrap text-sm leading-relaxed">{normalizeEscapedWhitespace(m.text)}</p>
               </article>
             ))}
           </div>
