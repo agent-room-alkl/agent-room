@@ -1,10 +1,7 @@
 import { Link, useNavigate } from 'react-router-dom';
 import { useState } from 'react';
 import { isValidCode } from '@agent-room/shared';
-import { addToWaitlist, createClient } from '@agent-room/upstash-client';
 import { copyText } from '../lib/copy.js';
-import { showToast } from '../components/Toast.js';
-import { ENV } from '../env.js';
 import { AnimatedRoomDemo } from '../components/AnimatedRoomDemo.js';
 import { AgentRoomLogo } from '../components/AgentRoomLogo.js';
 import { TopNav } from '../components/TopNav.js';
@@ -100,23 +97,7 @@ export function Home() {
   const navigate = useNavigate();
   const [code, setCode] = useState('');
   const [err, setErr] = useState<string | null>(null);
-  const [proWaitlistOpen, setProWaitlistOpen] = useState(false);
-  const [proEmail, setProEmail] = useState('');
-  const [proBusy, setProBusy] = useState(false);
 
-  async function submitProWaitlist() {
-    setProBusy(true);
-    try {
-      await addToWaitlist(createClient(ENV.upstash), proEmail);
-      showToast("You're on the list — we'll email you when Pro launches.");
-      setProWaitlistOpen(false);
-      setProEmail('');
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : 'Could not save — try again.');
-    } finally {
-      setProBusy(false);
-    }
-  }
   function go() {
     const normalized = normalize(code);
     if (isValidCode(normalized)) {
@@ -143,7 +124,7 @@ export function Home() {
           <div className="text-center max-w-3xl mx-auto mb-14">
             <div className="inline-flex items-center gap-2 bg-white/80 backdrop-blur border border-accent-tint-border text-accent text-xs font-semibold px-3 py-1.5 rounded-full mb-8 shadow-sm">
               <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse"></span>
-              Open &amp; free during beta — pay $19 only when you ship a delivery report
+              Open &amp; free during beta — paid tiers coming soon
             </div>
             <h1 className="text-5xl sm:text-6xl lg:text-7xl font-bold tracking-tight text-ink leading-[1.05]">
               Stop copy-pasting between<br />
@@ -462,11 +443,11 @@ export function Home() {
             </div>
             <h2 className="text-4xl sm:text-5xl font-bold tracking-tight">Pricing</h2>
             <p className="mt-4 text-lg text-ink-soft max-w-2xl mx-auto">
-              Use Agent Room free for any room. Pay $19 once when you're ready to give your client a clean, branded delivery report. Or go unlimited for ongoing project work.
+              Use Agent Room free for any room. Pay $19 once when you're ready to give your client a clean, branded delivery report.
             </p>
           </div>
 
-          <div className="grid md:grid-cols-2 xl:grid-cols-4 gap-6 mb-12">
+          <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-6 mb-12">
 
             {/* Free tier */}
             <div className="bg-white border border-border rounded-2xl p-7 hover:border-accent/40 hover:shadow-card transition flex flex-col">
@@ -523,38 +504,6 @@ export function Home() {
               <p className="text-[11px] text-ink-faint mt-2 text-center">
                 Pay inside the report page when you're ready to ship.
               </p>
-            </div>
-
-            {/* Pro monthly — coming soon (power-user gap between per-report and team) */}
-            <div className="bg-surface-softer/80 border border-dashed border-border rounded-2xl p-7 flex flex-col relative">
-              <div className="absolute -top-3 left-1/2 -translate-x-1/2 bg-white text-ink-muted text-[10px] font-bold uppercase tracking-wider px-3 py-1 rounded-full border border-border shadow-sm">
-                Coming soon
-              </div>
-              <div className="flex items-baseline justify-between mb-2">
-                <h3 className="text-lg font-bold tracking-tight">Pro</h3>
-                <span className="text-[10px] font-semibold text-violet-700 bg-violet-100 px-2 py-0.5 rounded uppercase tracking-wider">Power users</span>
-              </div>
-              <div className="mb-5">
-                <span className="text-3xl font-bold tracking-tight">$9</span>
-                <span className="text-ink-soft text-sm"> / month</span>
-              </div>
-              <p className="text-sm text-ink-soft mb-5 leading-relaxed">
-                Search across rooms, keep a permanent library, and export structured data — for folks who live in Agent Room daily but don&apos;t need the full Team stack yet.
-              </p>
-              <ul className="space-y-2 mb-6 text-sm text-ink-muted flex-1">
-                <li className="flex gap-2"><span className="text-accent">✓</span> Search across rooms</li>
-                <li className="flex gap-2"><span className="text-accent">✓</span> Permanent room library</li>
-                <li className="flex gap-2"><span className="text-accent">✓</span> CSV / JSON export</li>
-                <li className="flex gap-2"><span className="text-accent">✓</span> API access</li>
-              </ul>
-              <button
-                type="button"
-                onClick={() => { setProWaitlistOpen(true); }}
-                className="inline-flex w-full items-center justify-center bg-surface-softer border border-border text-ink-muted px-5 py-3 rounded-xl font-semibold text-sm opacity-90 hover:opacity-100 hover:border-ink-faint hover:bg-white transition cursor-pointer"
-              >
-                Notify me
-              </button>
-              <p className="text-[11px] text-ink-faint mt-2 text-center">No charge today — we&apos;ll email you when this tier opens.</p>
             </div>
 
             {/* Team monthly */}
@@ -615,54 +564,6 @@ export function Home() {
           </div>
         </div>
       </section>
-
-      {/* Pro waitlist modal */}
-      {proWaitlistOpen && (
-        <div
-          className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-ink/40 backdrop-blur-[2px]"
-          role="presentation"
-          onClick={() => { setProWaitlistOpen(false); }}
-        >
-          <div
-            role="dialog"
-            aria-labelledby="pro-waitlist-title"
-            className="bg-white rounded-2xl border border-border shadow-xl max-w-md w-full p-6 sm:p-8"
-            onClick={e => { e.stopPropagation(); }}
-          >
-            <h3 id="pro-waitlist-title" className="text-xl font-bold tracking-tight">Pro ($9/mo) — notify me</h3>
-            <p className="mt-2 text-sm text-ink-soft leading-relaxed">
-              Leave your email and we&apos;ll let you know when search, library, exports, and API access ship on the Pro tier.
-            </p>
-            <label className="mt-5 block text-xs font-semibold text-ink-muted">Email</label>
-            <input
-              type="email"
-              autoComplete="email"
-              value={proEmail}
-              onChange={e => { setProEmail(e.target.value); }}
-              onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); void submitProWaitlist(); } }}
-              placeholder="you@company.com"
-              className="mt-1 w-full font-mono text-sm px-4 py-3 bg-surface-softer border border-border rounded-lg outline-none focus:border-accent focus:ring-4 focus:ring-accent-tint"
-            />
-            <div className="mt-6 flex gap-3">
-              <button
-                type="button"
-                onClick={() => { setProWaitlistOpen(false); }}
-                className="flex-1 inline-flex items-center justify-center border border-border px-4 py-3 rounded-xl font-semibold text-sm text-ink-muted hover:bg-surface-soft transition"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={proBusy}
-                onClick={() => { void submitProWaitlist(); }}
-                className="flex-1 inline-flex items-center justify-center bg-accent text-white px-4 py-3 rounded-xl font-semibold text-sm hover:opacity-90 transition disabled:opacity-50"
-              >
-                {proBusy ? 'Saving…' : 'Notify me'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Footer */}
       <footer className="border-t border-border-faint py-10">
