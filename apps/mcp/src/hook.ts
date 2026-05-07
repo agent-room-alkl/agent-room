@@ -17,6 +17,7 @@ import {
   removeRoom,
   removeRoomEverywhere,
 } from './state.js';
+import { detectHarness } from './harness.js';
 
 // Stop-hook long-poll: how long the hook holds the turn open looking for new
 // room messages before letting the agent stop. Increased from the original
@@ -93,10 +94,10 @@ interface PendingRoom {
   messages: Message[];
 }
 
-type StateScope = 'scoped' | 'cursor';
+type StateScope = 'scoped' | 'harness';
 
 async function readHookState(scope: StateScope) {
-  return scope === 'cursor' ? readHarnessStateOrMerged() : readState();
+  return scope === 'harness' ? readHarnessStateOrMerged() : readState();
 }
 
 async function fetchPending(env: UpstashEnv, scope: StateScope): Promise<PendingRoom[]> {
@@ -163,7 +164,7 @@ function formatMessages(rooms: PendingRoom[]): string {
 
 async function commitCursors(rooms: PendingRoom[], scope: StateScope): Promise<void> {
   for (const r of rooms) {
-    if (scope === 'cursor') {
+    if (scope === 'harness') {
       await updateCursorEverywhere(r.code, r.newCursor);
     } else {
       await updateCursor(r.code, r.newCursor);
@@ -208,18 +209,19 @@ export async function runHook(env: UpstashEnv): Promise<void> {
     process.exit(0);
   }
   const { event, cursorMode } = classified;
-  // Cursor starts the MCP server and Stop hook under different npm wrapper
-  // processes, so their PPID-scoped state files do not match. Cursor stop
-  // hooks read a stable harness state file first and fall back to merged
-  // state for old pre-fix installs. Claude/Codex keep scoped state to
-  // preserve parallel-session isolation.
-  const stateScope: StateScope = cursorMode ? 'cursor' : 'scoped';
+  // Cursor and Codex may start the MCP server and Stop hook under different
+  // wrapper processes, so their PPID-scoped state files do not always match.
+  // Those hooks read a stable harness state file first and fall back to merged
+  // state for old pre-fix installs. Claude keeps scoped state to preserve
+  // parallel-session isolation.
+  const harnessKind = detectHarness().kind;
+  const stateScope: StateScope = cursorMode || harnessKind === 'codex' ? 'harness' : 'scoped';
 
   // User typed something — fresh turn cycle. Reset the block streak so the
   // next Stop hook can block fresh up to MAX_BLOCKS_PER_CYCLE times.
   if (event === 'UserPromptSubmit') {
     try {
-      if (stateScope === 'cursor') await resetBlockStreakEverywhere();
+      if (stateScope === 'harness') await resetBlockStreakEverywhere();
       else await resetBlockStreak();
     } catch { /* non-essential */ }
   }
@@ -240,7 +242,7 @@ export async function runHook(env: UpstashEnv): Promise<void> {
       // resets the counter via the UserPromptSubmit branch above (CC) or
       // the next user message in Cursor (loop_count resets to 0).
       try {
-        if (stateScope === 'cursor') await resetBlockStreakEverywhere();
+        if (stateScope === 'harness') await resetBlockStreakEverywhere();
         else await resetBlockStreak();
       } catch { /* non-essential */ }
       process.exit(0);
@@ -284,7 +286,7 @@ export async function runHook(env: UpstashEnv): Promise<void> {
   // pure idle loops, not real conversations).
   if (withMessages.length > 0 && event === 'Stop') {
     try {
-      if (stateScope === 'cursor') await resetBlockStreakEverywhere();
+      if (stateScope === 'harness') await resetBlockStreakEverywhere();
       else await resetBlockStreak();
     } catch { /* non-essential */ }
     const text = formatMessages(withMessages);
@@ -321,7 +323,7 @@ export async function runHook(env: UpstashEnv): Promise<void> {
           const stillIn = room.participants.some(p => p.name === r.name && p.client === 'cc');
           if (room.status !== 'active' || !stillIn) {
             try {
-              if (stateScope === 'cursor') await removeRoomEverywhere(code);
+              if (stateScope === 'harness') await removeRoomEverywhere(code);
               else await removeRoom(code);
             } catch { /* non-essential */ }
             continue;
@@ -330,7 +332,7 @@ export async function runHook(env: UpstashEnv): Promise<void> {
         } catch {
           // Room not found / TTL expired — drop it from state too.
           try {
-            if (stateScope === 'cursor') await removeRoomEverywhere(code);
+            if (stateScope === 'harness') await removeRoomEverywhere(code);
             else await removeRoom(code);
           } catch { /* non-essential */ }
         }
@@ -339,7 +341,7 @@ export async function runHook(env: UpstashEnv): Promise<void> {
 
     if (activeRooms.length > 0) {
       try {
-        if (stateScope === 'cursor') await bumpBlockStreakEverywhere();
+        if (stateScope === 'harness') await bumpBlockStreakEverywhere();
         else await bumpBlockStreak();
       } catch { /* non-essential */ }
       const lines: string[] = [];

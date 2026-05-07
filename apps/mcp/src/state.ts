@@ -20,7 +20,7 @@ const STATE_FILE =
 function currentHarnessStateFile(): string | null {
   if (process.env.AGENT_ROOM_STATE_FILE) return null;
   const kind = detectHarness().kind;
-  if (kind !== 'cursor') return null;
+  if (kind !== 'cursor' && kind !== 'codex') return null;
   return join(STATE_DIR, `state-harness-${kind}.json`);
 }
 
