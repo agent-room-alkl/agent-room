@@ -152,6 +152,13 @@ function elevenLabsSttDevPlugin(env: Record<string, string>): Plugin {
         const head = Buffer.from(
           `--${boundary}\r\n` +
           `Content-Disposition: form-data; name="model_id"\r\n\r\nscribe_v1\r\n` +
+          // Match api/stt.ts: suppress Scribe's "(humming)" /
+          // "(instrumental music)" tags + diarization (single speaker
+          // per upload).
+          `--${boundary}\r\n` +
+          `Content-Disposition: form-data; name="tag_audio_events"\r\n\r\nfalse\r\n` +
+          `--${boundary}\r\n` +
+          `Content-Disposition: form-data; name="diarize"\r\n\r\nfalse\r\n` +
           (langHint ? `--${boundary}\r\nContent-Disposition: form-data; name="language_code"\r\n\r\n${langHint}\r\n` : '') +
           `--${boundary}\r\n` +
           `Content-Disposition: form-data; name="file"; filename="audio.${ext}"\r\n` +

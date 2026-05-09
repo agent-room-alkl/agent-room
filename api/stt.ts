@@ -93,9 +93,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   const boundary = `----agent-room-${Math.random().toString(36).slice(2)}`;
   const ext = guessExt(contentType);
   const fileName = `audio.${ext}`;
+  // tag_audio_events=false stops Scribe from emitting "(humming)",
+  // "(instrumental music)", "(clicking)" and friends — Robin's
+  // session showed these as noise the AI shouldn't react to.
+  // diarize=false because we always have a single speaker per upload
+  // (the candidate); enabling it just lengthens the request without
+  // value here.
   const head = Buffer.from(
     `--${boundary}\r\n` +
     `Content-Disposition: form-data; name="model_id"\r\n\r\n${DEFAULT_MODEL_ID}\r\n` +
+    `--${boundary}\r\n` +
+    `Content-Disposition: form-data; name="tag_audio_events"\r\n\r\nfalse\r\n` +
+    `--${boundary}\r\n` +
+    `Content-Disposition: form-data; name="diarize"\r\n\r\nfalse\r\n` +
     (langHint ? `--${boundary}\r\nContent-Disposition: form-data; name="language_code"\r\n\r\n${langHint}\r\n` : '') +
     `--${boundary}\r\n` +
     `Content-Disposition: form-data; name="file"; filename="${fileName}"\r\n` +
@@ -139,9 +149,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
   // Scribe response shape: { text: string, language_code?: string,
   //   words?: [{ text, start, end, ... }], language_probability?: number }
-  const text = typeof (json as { text?: unknown }).text === 'string'
-    ? (json as { text: string }).text.trim()
+  // Scribe still occasionally emits bracketed audio-event tags even
+  // with tag_audio_events=false (e.g. "(silence)", "(music)" at
+  // utterance edges). Strip any (...) / [...] bracket-tags that look
+  // like single short non-speech labels — leaves real parenthetical
+  // content alone (parentheticals in spoken English tend to be
+  // longer than 32 chars).
+  const rawText = typeof (json as { text?: unknown }).text === 'string'
+    ? (json as { text: string }).text
     : '';
+  const text = rawText
+    .replace(/[\(\[][^\)\]]{0,32}[\)\]]/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
 
   res.setHeader('Cache-Control', 'no-store');
   res.status(200).json({
