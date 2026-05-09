@@ -9,11 +9,11 @@
 //   • A live interim strip floats above the input while you speak so
 //     you can see what the recognizer is hearing in real time.
 //   • An accumulator stitches every final segment together with the
-//     latest interim. The single `onTranscript` fires once at the end
-//     with the whole utterance.
+//     latest interim. The single `onTranscript` fires once per spoken
+//     turn with the whole utterance.
 //   • A silence timer (default 5s) resets on each onresult event. When
-//     it expires we commit and stop. Clicking the mic again also
-//     commits early.
+//     it expires we commit that turn, but the mic stays open for the
+//     next turn. Clicking the mic again commits early and turns it off.
 //
 // SpeechRecognition is non-standard; typed `any` to avoid pulling in
 // dom-speech-recognition for one component. Returns null on browsers
@@ -22,13 +22,12 @@
 import { useEffect, useRef, useState } from 'react';
 
 interface Props {
-  /** Fired ONCE per session with the full accumulated transcript when
-   *  the silence timer expires or the user clicks stop. Empty
-   *  transcript (silence-only session) is suppressed. */
+  /** Fired once per spoken turn after the user is quiet for `silenceMs`.
+   *  Empty transcript (silence-only session) is suppressed. */
   onTranscript: (text: string) => void;
   disabled?: boolean;
   /** Milliseconds of silence after the last result before we commit
-   *  and stop. Default 5000ms — Robin's "等我不说话大概5秒后才结束". */
+   *  the current spoken turn. Default 5000ms — Robin's "等我不说话大概5秒后才结束". */
   silenceMs?: number;
   /** Recognizer language code. Defaults to the browser/system locale.
    *  Override to e.g. 'en-US' for English-only sessions. */
@@ -44,12 +43,14 @@ export function VoiceButton({ onTranscript, disabled, silenceMs = 5000, lang }: 
   const [listening, setListening] = useState(false);
   const [interim, setInterim] = useState('');
   const recognitionRef = useRef<any>(null);
+  const listeningRef = useRef(false);
   // Accumulated final segments — committed with the trailing interim
   // when silence triggers commit. Stored in a ref because the
   // SpeechRecognition event handlers run outside React's render cycle.
   const finalSegmentsRef = useRef<string[]>([]);
   const interimRef = useRef('');
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   if (!SpeechRecognitionImpl) return null;
 
@@ -60,25 +61,33 @@ export function VoiceButton({ onTranscript, disabled, silenceMs = 5000, lang }: 
     }
   }
 
-  function commitAndStop() {
-    clearSilenceTimer();
-    const recognition = recognitionRef.current;
-    if (recognition) {
-      try { recognition.stop(); } catch { /* already stopped */ }
+  function clearRestartTimer() {
+    if (restartTimerRef.current !== null) {
+      clearTimeout(restartTimerRef.current);
+      restartTimerRef.current = null;
     }
-    // The recognition.onend handler does the actual onTranscript fire
-    // and state cleanup so a single stop() vs a silence-timer-fired
-    // stop go through the same code path.
+  }
+
+  function commitTurn() {
+    clearSilenceTimer();
+    const finals = finalSegmentsRef.current.join(' ').trim();
+    const trailing = interimRef.current.trim();
+    const full = [finals, trailing].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+    finalSegmentsRef.current = [];
+    interimRef.current = '';
+    setInterim('');
+    if (full) onTranscript(full);
   }
 
   function scheduleSilenceCommit() {
     clearSilenceTimer();
     silenceTimerRef.current = setTimeout(() => {
-      commitAndStop();
+      commitTurn();
     }, silenceMs);
   }
 
-  function start() {
+  function startRecognition() {
+    if (!listeningRef.current) return;
     const recognition = new SpeechRecognitionImpl();
     recognition.lang = lang || navigator.language || 'en-US';
     // Continuous so the recognizer keeps listening across natural
@@ -123,38 +132,62 @@ export function VoiceButton({ onTranscript, disabled, silenceMs = 5000, lang }: 
     };
 
     recognition.onend = () => {
-      clearSilenceTimer();
-      const finals = finalSegmentsRef.current.join(' ').trim();
-      const trailing = interimRef.current.trim();
-      const full = [finals, trailing].filter(Boolean).join(' ').trim();
-      finalSegmentsRef.current = [];
-      interimRef.current = '';
-      setInterim('');
-      setListening(false);
       recognitionRef.current = null;
-      if (full) onTranscript(full);
+      if (listeningRef.current) {
+        clearRestartTimer();
+        restartTimerRef.current = setTimeout(() => {
+          startRecognition();
+        }, 150);
+      } else {
+        clearSilenceTimer();
+        setInterim('');
+        setListening(false);
+      }
     };
 
     try {
       recognition.start();
       recognitionRef.current = recognition;
       setListening(true);
-      // Even if the user never says anything, commit-and-stop after
-      // silenceMs from the click. Without this, a click + never-speak
-      // would leave the mic open forever.
-      scheduleSilenceCommit();
     } catch {
-      setListening(false);
+      if (listeningRef.current) {
+        clearRestartTimer();
+        restartTimerRef.current = setTimeout(() => {
+          startRecognition();
+        }, 250);
+      } else {
+        setListening(false);
+      }
     }
   }
 
+  function start() {
+    listeningRef.current = true;
+    finalSegmentsRef.current = [];
+    interimRef.current = '';
+    setInterim('');
+    clearSilenceTimer();
+    clearRestartTimer();
+    startRecognition();
+  }
+
   function stop() {
-    commitAndStop();
+    listeningRef.current = false;
+    clearRestartTimer();
+    commitTurn();
+    const recognition = recognitionRef.current;
+    if (recognition) {
+      try { recognition.abort(); } catch { /* already stopped */ }
+    }
+    recognitionRef.current = null;
+    setListening(false);
   }
 
   useEffect(() => {
     return () => {
+      listeningRef.current = false;
       clearSilenceTimer();
+      clearRestartTimer();
       const recognition = recognitionRef.current;
       if (recognition) {
         try { recognition.abort(); } catch { /* ignore */ }
@@ -168,8 +201,8 @@ export function VoiceButton({ onTranscript, disabled, silenceMs = 5000, lang }: 
         type="button"
         disabled={disabled}
         onClick={listening ? stop : start}
-        aria-label={listening ? 'Stop voice input' : 'Start voice input'}
-        title={listening ? 'Stop (commit now)' : 'Start streaming voice input'}
+        aria-label={listening ? 'Stop listening' : 'Start listening'}
+        title={listening ? 'Stop listening (commit current turn)' : 'Start streaming voice input'}
         className={`text-base leading-none w-9 h-9 flex items-center justify-center rounded-lg transition ${
           listening
             ? 'bg-red-100 text-red-600 animate-pulse'
@@ -180,7 +213,7 @@ export function VoiceButton({ onTranscript, disabled, silenceMs = 5000, lang }: 
       </button>
       {listening && (
         <div className="absolute left-3 right-3 -top-7 px-3 py-1 bg-accent-tint text-accent-deep text-[11px] italic rounded-full shadow-sm truncate pointer-events-none">
-          {interim ? interim : 'Listening… (auto-sends after ~5s of silence)'}
+          {interim ? interim : 'Listening… (sends each turn after ~5s of silence)'}
         </div>
       )}
     </>
