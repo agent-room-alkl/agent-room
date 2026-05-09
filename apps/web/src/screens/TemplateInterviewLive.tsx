@@ -311,36 +311,78 @@ export function TemplateInterviewLive() {
   }, [code, messages, busyReply, candidateName]);
 
   // Voice demo layer: every new AI Interviewer message renders as text
-  // AND tries to auto-play via the browser's built-in speech synthesis.
-  // Some browsers block speech until after the user's first interaction;
-  // the visual audio bar still shows the intended voice reply either way.
+  // AND tries to auto-play. Tries ElevenLabs (Rachel · American) via
+  // /api/elevenlabs-tts first; falls back to the browser's built-in
+  // speech synthesis if the function 503s (key not configured) or
+  // 404s (vite dev without our dev plugin). Some browsers block all
+  // audio until after the user's first interaction; we render the
+  // visual audio bar either way and the unlock-on-first-gesture
+  // listener primes both pipelines.
   useEffect(() => {
     if (!latestInterviewerMessage) return;
     if (spokenMessageRef.current === latestInterviewerMessage.id) return;
     spokenMessageRef.current = latestInterviewerMessage.id;
-    setSpeakingMessageId(latestInterviewerMessage.id);
+    const messageToSpeak = latestInterviewerMessage;
+    setSpeakingMessageId(messageToSpeak.id);
 
     const fallbackTimer = window.setTimeout(() => {
-      setSpeakingMessageId(current => current === latestInterviewerMessage.id ? null : current);
-    }, 7000);
+      setSpeakingMessageId(current => (current === messageToSpeak.id ? null : current));
+    }, Math.max(7000, messageToSpeak.text.length * 90));
 
-    if (!('speechSynthesis' in window)) {
-      return () => window.clearTimeout(fallbackTimer);
+    let cancelled = false;
+    let activeAudio: HTMLAudioElement | null = null;
+    let activeUrl: string | null = null;
+
+    function clearSpeaking() {
+      window.clearTimeout(fallbackTimer);
+      setSpeakingMessageId(current => (current === messageToSpeak.id ? null : current));
     }
 
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(latestInterviewerMessage.text);
-    utterance.rate = 0.95;
-    utterance.pitch = 1;
-    utterance.onend = () => {
+    async function playElevenLabsOrBrowser() {
+      try {
+        const resp = await fetch('/api/elevenlabs-tts', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ text: messageToSpeak.text }),
+        });
+        const ct = resp.headers.get('content-type') ?? '';
+        if (!resp.ok || !ct.includes('audio/')) throw new Error('ElevenLabs unavailable');
+        const blob = await resp.blob();
+        if (cancelled) return;
+        activeUrl = URL.createObjectURL(blob);
+        activeAudio = new Audio(activeUrl);
+        activeAudio.onended = clearSpeaking;
+        activeAudio.onerror = clearSpeaking;
+        await activeAudio.play();
+        return;
+      } catch {
+        // Fall through to browser TTS.
+      }
+      if (cancelled || !('speechSynthesis' in window)) {
+        clearSpeaking();
+        return;
+      }
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(messageToSpeak.text);
+      utterance.rate = 0.95;
+      utterance.pitch = 1;
+      utterance.onend = clearSpeaking;
+      utterance.onerror = clearSpeaking;
+      window.setTimeout(() => window.speechSynthesis.speak(utterance), 120);
+    }
+
+    void playElevenLabsOrBrowser();
+
+    return () => {
+      cancelled = true;
       window.clearTimeout(fallbackTimer);
-      setSpeakingMessageId(current => current === latestInterviewerMessage.id ? null : current);
+      if (activeAudio) {
+        activeAudio.pause();
+        activeAudio.onended = null;
+        activeAudio.onerror = null;
+      }
+      if (activeUrl) URL.revokeObjectURL(activeUrl);
     };
-    utterance.onerror = () => {
-      window.clearTimeout(fallbackTimer);
-      setSpeakingMessageId(current => current === latestInterviewerMessage.id ? null : current);
-    };
-    window.setTimeout(() => window.speechSynthesis.speak(utterance), 120);
 
     return () => {
       window.clearTimeout(fallbackTimer);
