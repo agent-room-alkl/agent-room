@@ -71,6 +71,7 @@ export function TemplateInterviewLive() {
   // re-render or a duplicate poll doesn't trigger two AI replies.
   const repliedToRef = useRef<Set<number>>(new Set());
   const spokenMessageRef = useRef<number | null>(null);
+  const speechUnlockedRef = useRef(false);
 
   // Set up the room on first mount. Strict-mode-safe: a ref guards
   // against React 18's intentional double-invocation of effects in dev.
@@ -142,6 +143,25 @@ export function TemplateInterviewLive() {
     () => [...messages].reverse().find(m => m.type === 'msg' && m.name === INTERVIEWER_NAME && m.client === 'cc') ?? null,
     [messages],
   );
+
+  const unlockSpeech = useCallback(() => {
+    if (speechUnlockedRef.current) return;
+    if (!('speechSynthesis' in window)) return;
+    speechUnlockedRef.current = true;
+    const utterance = new SpeechSynthesisUtterance(' ');
+    utterance.volume = 0;
+    window.speechSynthesis.speak(utterance);
+  }, []);
+
+  useEffect(() => {
+    const onFirstGesture = () => unlockSpeech();
+    window.addEventListener('pointerdown', onFirstGesture, { once: true });
+    window.addEventListener('keydown', onFirstGesture, { once: true });
+    return () => {
+      window.removeEventListener('pointerdown', onFirstGesture);
+      window.removeEventListener('keydown', onFirstGesture);
+    };
+  }, [unlockSpeech]);
 
   // Trigger an AI reply. Pulls the current transcript shape and posts a
   // turn from "AI Interviewer". Idempotent on its own — but we still
@@ -264,6 +284,7 @@ export function TemplateInterviewLive() {
   }, [latestInterviewerMessage]);
 
   async function sendCandidate() {
+    unlockSpeech();
     const text = draft.trim();
     if (!code || !text) return;
     setDraft('');
@@ -432,6 +453,7 @@ export function TemplateInterviewLive() {
             <div className="border-t border-border-faint pt-3 mt-3 flex flex-col gap-2">
               <textarea
                 value={draft}
+                onFocus={unlockSpeech}
                 onChange={e => setDraft(e.target.value)}
                 onKeyDown={e => {
                   if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
