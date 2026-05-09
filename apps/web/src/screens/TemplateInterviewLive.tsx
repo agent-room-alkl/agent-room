@@ -66,9 +66,11 @@ export function TemplateInterviewLive() {
   const [usingLiveLLM, setUsingLiveLLM] = useState<boolean | null>(null);
   const [draft, setDraft] = useState('');
   const [busyReply, setBusyReply] = useState(false);
+  const [speakingMessageId, setSpeakingMessageId] = useState<number | null>(null);
   // Track which candidate messages we've already responded to so a
   // re-render or a duplicate poll doesn't trigger two AI replies.
   const repliedToRef = useRef<Set<number>>(new Set());
+  const spokenMessageRef = useRef<number | null>(null);
 
   // Set up the room on first mount. Strict-mode-safe: a ref guards
   // against React 18's intentional double-invocation of effects in dev.
@@ -135,6 +137,10 @@ export function TemplateInterviewLive() {
   const candidateTurns = useMemo(
     () => messages.filter(m => m.type === 'msg' && m.client === 'web' && m.name === candidateName).length,
     [messages, candidateName],
+  );
+  const latestInterviewerMessage = useMemo(
+    () => [...messages].reverse().find(m => m.type === 'msg' && m.name === INTERVIEWER_NAME && m.client === 'cc') ?? null,
+    [messages],
   );
 
   // Trigger an AI reply. Pulls the current transcript shape and posts a
@@ -218,6 +224,44 @@ export function TemplateInterviewLive() {
     // Same exclusion rationale as the opening effect above.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [code, messages, busyReply, candidateName]);
+
+  // Voice demo layer: every new AI Interviewer message renders as text
+  // AND tries to auto-play via the browser's built-in speech synthesis.
+  // Some browsers block speech until after the user's first interaction;
+  // the visual audio bar still shows the intended voice reply either way.
+  useEffect(() => {
+    if (!latestInterviewerMessage) return;
+    if (spokenMessageRef.current === latestInterviewerMessage.id) return;
+    spokenMessageRef.current = latestInterviewerMessage.id;
+    setSpeakingMessageId(latestInterviewerMessage.id);
+
+    const fallbackTimer = window.setTimeout(() => {
+      setSpeakingMessageId(current => current === latestInterviewerMessage.id ? null : current);
+    }, 7000);
+
+    if (!('speechSynthesis' in window)) {
+      return () => window.clearTimeout(fallbackTimer);
+    }
+
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(latestInterviewerMessage.text);
+    utterance.rate = 0.95;
+    utterance.pitch = 1;
+    utterance.onend = () => {
+      window.clearTimeout(fallbackTimer);
+      setSpeakingMessageId(current => current === latestInterviewerMessage.id ? null : current);
+    };
+    utterance.onerror = () => {
+      window.clearTimeout(fallbackTimer);
+      setSpeakingMessageId(current => current === latestInterviewerMessage.id ? null : current);
+    };
+    window.setTimeout(() => window.speechSynthesis.speak(utterance), 120);
+
+    return () => {
+      window.clearTimeout(fallbackTimer);
+      if (window.speechSynthesis.speaking) window.speechSynthesis.cancel();
+    };
+  }, [latestInterviewerMessage]);
 
   async function sendCandidate() {
     const text = draft.trim();
@@ -371,6 +415,9 @@ export function TemplateInterviewLive() {
                       <span className="text-[10px] text-ink-faint">{new Date(m.time).toLocaleTimeString()}</span>
                     </div>
                     <p className="text-[13px] leading-relaxed text-ink-soft whitespace-pre-wrap">{m.text}</p>
+                    {m.client === 'cc' && (
+                      <AudioReplyBar active={speakingMessageId === m.id} />
+                    )}
                   </div>
                 </li>
               ))}
@@ -435,6 +482,26 @@ export function TemplateInterviewLive() {
           </aside>
         </div>
       </main>
+    </div>
+  );
+}
+
+function AudioReplyBar({ active }: { active: boolean }) {
+  return (
+    <div className="mt-2 flex items-center gap-2 rounded-full border border-indigo-100 bg-indigo-50 px-3 py-2">
+      <div className={`h-2.5 w-2.5 rounded-full ${active ? 'bg-indigo-500' : 'bg-indigo-300'}`} />
+      <div className="flex h-6 flex-1 items-center gap-1">
+        {[16, 28, 20, 34, 22, 30, 18, 26, 32, 20, 28, 16, 24, 18].map((height, index) => (
+          <span
+            key={`${height}-${index}`}
+            className={`w-full rounded-full bg-indigo-400 ${active ? 'animate-pulse' : 'opacity-35'}`}
+            style={{ height: `${height}px`, animationDelay: `${index * 45}ms` }}
+          />
+        ))}
+      </div>
+      <span className="shrink-0 text-[10px] font-semibold text-indigo-700">
+        {active ? 'Playing voice' : 'Voice reply'}
+      </span>
     </div>
   );
 }
