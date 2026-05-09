@@ -7,6 +7,8 @@ import { Room } from './screens/Room.js';
 import { Report } from './screens/Report.js';
 import { Join } from './screens/Join.js';
 import { UnlockPending } from './screens/UnlockPending.js';
+import { TemplateIndex } from './screens/TemplateIndex.js';
+import { TemplateDetail } from './screens/TemplateDetail.js';
 import { ToastHost } from './components/Toast.js';
 import { Analytics } from './components/Analytics.js';
 
@@ -34,6 +36,8 @@ function ReportByParam() {
 
 export const router = createBrowserRouter([
   { path: '/', element: <Layout><Home /></Layout> },
+  { path: '/templates', element: <Layout><TemplateIndex /></Layout> },
+  { path: '/templates/:templateId', element: <Layout><TemplateDetail /></Layout> },
   { path: '/new', element: <Layout><CreateMeeting /></Layout> },
   { path: '/r/:code/lobby', element: <Layout><LobbyByParam /></Layout> },
   { path: '/r/:code', element: <Layout><RoomByParam /></Layout> },

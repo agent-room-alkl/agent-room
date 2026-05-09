@@ -12,6 +12,9 @@ export function TopNav() {
           <a href="#features" className="text-sm font-medium text-ink-soft hover:text-ink transition">
             Features
           </a>
+          <Link to="/templates" className="text-sm font-medium text-ink-soft hover:text-ink transition">
+            Templates
+          </Link>
           <a href="#how-it-works" className="text-sm font-medium text-ink-soft hover:text-ink transition">
             How it works
           </a>
