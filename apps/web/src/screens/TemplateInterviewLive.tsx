@@ -50,6 +50,42 @@ function pickStage(candidateTurns: number): Stage {
   return 'wrap';
 }
 
+// Mirrors api/interview-reply.ts's scripted ladder so the demo still
+// produces real interviewer turns when /api/interview-reply isn't
+// reachable. `vite dev` doesn't execute Vercel functions; we'd
+// otherwise hit Vite's SPA fallback (index.html, not JSON) and
+// silently fail. In production this only fires if the function 5xx's.
+const CLIENT_LADDER: Record<Stage, string[]> = {
+  opening: [
+    "Hi — thanks for taking the time. I'll keep this to about 20 minutes. To start: walk me through the project from your last 6 months you're proudest of. What was the thing you owned, what was the trade-off you optimized for, and what would you do differently?",
+  ],
+  depth: [
+    "That's a useful framing. Going one level deeper: what specifically did you give up to get the upside you described? I'm asking because the candidates I worry about are the ones who can't name what they traded away.",
+    "Got it. One follow-up — at what point did you realize the original plan wasn't going to work, and what tipped it for you? I'm trying to read your debugging instincts.",
+  ],
+  tradeoffs: [
+    "Switching gears for a minute. Imagine you have a service that's hitting 99.5% uptime but the team is exhausted from on-call. The CEO wants 99.9%. How do you push back, and what data would you bring?",
+    "If you had to pick one of: cleaner architecture, faster shipping, or fewer outages — for the next quarter only — which do you pick and why? No 'all three' allowed.",
+  ],
+  behavioral: [
+    "Tell me about a time you disagreed with a more senior person on a technical call. Walk me through what they were arguing, what you were arguing, and how it actually resolved. Names off, specifics on.",
+    "Last one in this round — when did you most recently change your mind about something you'd previously been confident in? What changed?",
+  ],
+  wrap: [
+    "Good answers across the board. Two minutes left — anything you want me to flag to the hiring manager that we didn't cover? Could be a strength I missed or a concern you'd rather raise yourself.",
+    "Thanks — wrapping up. You'll get a structured scorecard out of this session within an hour. Have a good rest of your day.",
+  ],
+};
+
+function clientLadderLine(
+  stage: Stage,
+  transcript: { speaker: 'candidate' | 'interviewer'; text: string }[],
+): string {
+  const interviewerSoFar = transcript.filter(t => t.speaker === 'interviewer').length;
+  const lines = CLIENT_LADDER[stage];
+  return lines[Math.min(interviewerSoFar, lines.length - 1)] ?? lines[0]!;
+}
+
 export function TemplateInterviewLive() {
   // Static template metadata (status pill, pricing, pilot CTA). We keep
   // the buyer story rendered on the page so the live demo stays
@@ -73,14 +109,20 @@ export function TemplateInterviewLive() {
   const spokenMessageRef = useRef<number | null>(null);
   const speechUnlockedRef = useRef(false);
 
-  // Set up the room on first mount. Strict-mode-safe: a ref guards
-  // against React 18's intentional double-invocation of effects in dev.
+  // Set up the room on first mount. Strict-mode-safe via the ref guard
+  // alone — no `cancelled` flag, because React 18's dev double-invoke
+  // pattern (mount → unmount → mount) would set cancelled=true between
+  // the first invocation's awaits, which then skipped setCode and the
+  // page hung at "Creating the room…" forever. The ref guard prevents
+  // a SECOND setup from starting; we let the FIRST setup complete
+  // normally even if its effect cleanup ran. setState on an unmounted
+  // component is a no-op + warning in dev, not a crash, which is the
+  // right trade-off for this single-shot setup.
   const setupRef = useRef(false);
   useEffect(() => {
     if (setupRef.current) return;
     setupRef.current = true;
 
-    let cancelled = false;
     (async () => {
       try {
         const newCode = generateCode();
@@ -123,14 +165,11 @@ export function TemplateInterviewLive() {
           },
           { priorIdentity: { name: INTERVIEWER_NAME, client: 'cc' } },
         );
-        if (cancelled) return;
         setCode(newCode);
       } catch (e) {
-        if (!cancelled) setSetupError(e instanceof Error ? e.message : String(e));
+        setSetupError(e instanceof Error ? e.message : String(e));
       }
     })();
-
-    return () => { cancelled = true; };
   }, [candidateName]);
 
   const { room, messages, error: roomError } = useRoom(code ?? '', candidateName);
@@ -167,6 +206,14 @@ export function TemplateInterviewLive() {
   // turn from "AI Interviewer". Idempotent on its own — but we still
   // gate at the call site by message id (`repliedToRef`) so two fires
   // don't double-post.
+  //
+  // Falls back to an in-page scripted ladder when /api/interview-reply
+  // is unreachable. This matters for two cases: (a) `vite dev` doesn't
+  // execute Vercel serverless functions, so localhost would otherwise
+  // get a 404 + non-JSON Vite SPA fallback that blew up resp.json();
+  // (b) production transient failures of the function itself. Either
+  // way the demo keeps moving and the badge flips honestly to
+  // "scripted" so we don't claim more intelligence than is on the wire.
   const triggerInterviewerTurn = useCallback(
     async (forCandidateMessageId: number | 'opening') => {
       if (!code) return;
@@ -179,12 +226,30 @@ export function TemplateInterviewLive() {
             speaker: (m.name === INTERVIEWER_NAME ? 'interviewer' : 'candidate') as 'candidate' | 'interviewer',
             text: m.text,
           }));
-        const resp = await fetch('/api/interview-reply', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ code, transcript: transcriptForLLM, stage }),
-        });
-        const body = await resp.json() as { text: string; ai: boolean; stage: Stage };
+        let resp: Response | null = null;
+        try {
+          resp = await fetch('/api/interview-reply', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ code, transcript: transcriptForLLM, stage }),
+          });
+        } catch (e) {
+          console.warn('[interview-reply] fetch threw, using client fallback', e);
+        }
+
+        let body: { text: string; ai: boolean; stage: Stage };
+        if (resp && resp.ok) {
+          // The function may also return non-JSON in dev (when Vite's SPA
+          // fallback intercepts /api/* with index.html). Try-parse and
+          // fall back if the body isn't a JSON envelope.
+          try {
+            body = (await resp.json()) as { text: string; ai: boolean; stage: Stage };
+          } catch {
+            body = { text: clientLadderLine(stage, transcriptForLLM), ai: false, stage };
+          }
+        } else {
+          body = { text: clientLadderLine(stage, transcriptForLLM), ai: false, stage };
+        }
         setUsingLiveLLM(body.ai);
         const client = createClient(ENV.upstash);
         const msg: Message = {
