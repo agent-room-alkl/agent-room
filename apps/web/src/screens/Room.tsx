@@ -848,7 +848,36 @@ export function Room() {
                 </div>
                 <div className="flex items-center gap-2">
                   <VoiceButton
-                    onTranscript={(t) => setText(prev => prev.trim() ? `${prev.trim()} ${t}` : t)}
+                    // Robin: 实时面试感 — 点麦、说话、停了就自动发，AI 立刻收到 +
+                    // 用 ElevenLabs 语音回复。Auto-send the recognized transcript
+                    // as a candidate message; the existing voice-playback
+                    // pipeline picks up the AI's reply with no extra wiring.
+                    // Keeps any pending draft text by appending the
+                    // transcript first — so a user can mix typed + spoken
+                    // in the same message if they clicked mic mid-typing.
+                    onTranscript={async (t) => {
+                      if (ended || !t.trim()) return;
+                      const merged = text.trim() ? `${text.trim()} ${t.trim()}` : t.trim();
+                      const msg: Message = {
+                        id: Date.now(),
+                        type: 'msg',
+                        name: me.name,
+                        role: me.role,
+                        initials: initialsFor(me.name),
+                        color: colorForName(me.name),
+                        client: 'web',
+                        text: merged,
+                        time: Date.now(),
+                      };
+                      setText('');
+                      try {
+                        await sendMessage(msg);
+                      } catch (e) {
+                        const { showToast } = await import('../components/Toast.js');
+                        showToast(e instanceof Error ? `Send failed: ${e.message}` : 'Send failed');
+                        setText(merged); // restore draft so user can retry
+                      }
+                    }}
                     disabled={ended}
                   />
                   <input

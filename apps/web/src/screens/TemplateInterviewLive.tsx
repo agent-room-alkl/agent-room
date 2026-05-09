@@ -36,6 +36,7 @@ import { colorForName, initialsFor } from '../lib/colors.js';
 import { useRoom } from '../hooks/useRoom.js';
 import { TopNav } from '../components/TopNav.js';
 import { AudioReplyBar } from '../components/AudioReplyBar.js';
+import { VoiceButton } from '../components/VoiceButton.js';
 import { templateBySlug } from '../lib/liveTemplates.js';
 
 type Stage = 'opening' | 'depth' | 'tradeoffs' | 'behavioral' | 'wrap';
@@ -391,11 +392,14 @@ export function TemplateInterviewLive() {
     };
   }, [latestInterviewerMessage]);
 
-  async function sendCandidate() {
+  // Optional explicit text lets the mic auto-send a recognized
+  // transcript without going through the input field at all. Default
+  // pulls from `draft` (the typed input).
+  async function sendCandidate(explicitText?: string) {
     unlockSpeech();
-    const text = draft.trim();
+    const text = (explicitText ?? draft).trim();
     if (!code || !text) return;
-    setDraft('');
+    if (!explicitText) setDraft('');
     const client = createClient(ENV.upstash);
     const msg: Message = {
       id: Date.now(),
@@ -574,13 +578,24 @@ export function TemplateInterviewLive() {
                 disabled={!code}
                 className="w-full resize-none px-3 py-2 bg-surface-softer border border-border rounded-lg text-sm leading-relaxed outline-none focus:border-accent focus:ring-2 focus:ring-accent-tint disabled:opacity-50"
               />
-              <button
-                onClick={() => void sendCandidate()}
-                disabled={!code || !draft.trim()}
-                className="self-end bg-accent text-white px-4 py-1.5 rounded-lg text-xs font-semibold disabled:opacity-50"
-              >
-                Send
-              </button>
+              <div className="flex items-center justify-end gap-2 relative">
+                {/* Mic — clicks SpeechRecognition; final transcript auto-
+                    sends as a candidate message. Real-time interview feel:
+                    speak, the AI hears, the AI replies with voice. Falls
+                    silent on browsers without SpeechRecognition support
+                    (Firefox / older Safari). */}
+                <VoiceButton
+                  onTranscript={(t) => { void sendCandidate(t); }}
+                  disabled={!code}
+                />
+                <button
+                  onClick={() => void sendCandidate()}
+                  disabled={!code || !draft.trim()}
+                  className="bg-accent text-white px-4 py-1.5 rounded-lg text-xs font-semibold disabled:opacity-50"
+                >
+                  Send
+                </button>
+              </div>
             </div>
           </div>
 
