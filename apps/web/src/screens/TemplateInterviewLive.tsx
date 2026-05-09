@@ -35,6 +35,7 @@ import { ENV } from '../env.js';
 import { colorForName, initialsFor } from '../lib/colors.js';
 import { useRoom } from '../hooks/useRoom.js';
 import { TopNav } from '../components/TopNav.js';
+import { AudioReplyBar } from '../components/AudioReplyBar.js';
 import { templateBySlug } from '../lib/liveTemplates.js';
 
 type Stage = 'opening' | 'depth' | 'tradeoffs' | 'behavioral' | 'wrap';
@@ -544,7 +545,7 @@ export function TemplateInterviewLive() {
                     </div>
                     <p className="text-[13px] leading-relaxed text-ink-soft whitespace-pre-wrap">{m.text}</p>
                     {m.client === 'cc' && (
-                      <AudioReplyBar active={speakingMessageId === m.id} />
+                      <AudioReplyBar text={m.text} active={speakingMessageId === m.id} />
                     )}
                   </div>
                 </li>
@@ -615,22 +616,9 @@ export function TemplateInterviewLive() {
   );
 }
 
-function AudioReplyBar({ active }: { active: boolean }) {
-  return (
-    <div className="mt-2 flex items-center gap-2 rounded-full border border-indigo-100 bg-indigo-50 px-3 py-2">
-      <div className={`h-2.5 w-2.5 rounded-full ${active ? 'bg-indigo-500' : 'bg-indigo-300'}`} />
-      <div className="flex h-6 flex-1 items-center gap-1">
-        {[16, 28, 20, 34, 22, 30, 18, 26, 32, 20, 28, 16, 24, 18].map((height, index) => (
-          <span
-            key={`${height}-${index}`}
-            className={`w-full rounded-full bg-indigo-400 ${active ? 'animate-pulse' : 'opacity-35'}`}
-            style={{ height: `${height}px`, animationDelay: `${index * 45}ms` }}
-          />
-        ))}
-      </div>
-      <span className="shrink-0 text-[10px] font-semibold text-indigo-700">
-        {active ? 'Playing voice' : 'Voice reply'}
-      </span>
-    </div>
-  );
-}
+// (Inline waveform AudioReplyBar removed — Robin asked for compact
+// chat-app voice pill design + click-to-replay + width that scales
+// with text length. The shared `apps/web/src/components/AudioReplyBar`
+// implementation now handles all three; importing it keeps the
+// /templates/interview demo and the regular /r/<CODE> rooms visually
+// consistent.)

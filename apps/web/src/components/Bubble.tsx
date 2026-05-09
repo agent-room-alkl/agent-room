@@ -42,9 +42,15 @@ export function Bubble({ message, self, ambiguousNames, speakingMessageId }: Pro
         </div>
         {/* Voice indicator: render under any AI (cc) bubble. The Room
             decides which message id is currently speaking via
-            speakingMessageId — Bubble itself is purely presentational. */}
+            speakingMessageId — Bubble itself is purely presentational.
+            Clicking the bar (re-)plays the text via /api/elevenlabs-tts
+            from inside AudioReplyBar; the Room-level pipeline drives
+            auto-play state. */}
         {message.client === 'cc' && message.text.trim() && (
-          <AudioReplyBar active={speakingMessageId === message.id} />
+          <AudioReplyBar
+            text={message.text}
+            active={speakingMessageId === message.id}
+          />
         )}
       </div>
     </div>
