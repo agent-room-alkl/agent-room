@@ -1,83 +1,165 @@
+// Streaming-style microphone button. Robin's read on the prior single-
+// shot version: "持续监听的时间太短了 ，马上就发出去了 我要的是实时的
+// 监听 我说什么 就一直会监听 实时流的形式 等我不说话大概5秒后才结束"
+// — keep listening as I speak, real-time stream, only commit when I've
+// been silent for ~5 seconds.
+//
+// Behaviour now:
+//   • `continuous: true` — recognition stays open across pauses.
+//   • A live interim strip floats above the input while you speak so
+//     you can see what the recognizer is hearing in real time.
+//   • An accumulator stitches every final segment together with the
+//     latest interim. The single `onTranscript` fires once at the end
+//     with the whole utterance.
+//   • A silence timer (default 5s) resets on each onresult event. When
+//     it expires we commit and stop. Clicking the mic again also
+//     commits early.
+//
+// SpeechRecognition is non-standard; typed `any` to avoid pulling in
+// dom-speech-recognition for one component. Returns null on browsers
+// without support so the caller renders a no-op button slot.
+
 import { useEffect, useRef, useState } from 'react';
 
 interface Props {
-  /** Called once with the final recognized transcript when the user stops or
-   *  the recognizer ends. Caller decides how to merge into the input field. */
+  /** Fired ONCE per session with the full accumulated transcript when
+   *  the silence timer expires or the user clicks stop. Empty
+   *  transcript (silence-only session) is suppressed. */
   onTranscript: (text: string) => void;
   disabled?: boolean;
+  /** Milliseconds of silence after the last result before we commit
+   *  and stop. Default 5000ms — Robin's "等我不说话大概5秒后才结束". */
+  silenceMs?: number;
+  /** Recognizer language code. Defaults to the browser/system locale.
+   *  Override to e.g. 'en-US' for English-only sessions. */
+  lang?: string;
 }
 
-// Browser SpeechRecognition is non-standard: typed as `any` to avoid pulling
-// in a dom-speech-recognition lib for a single component. Returns null when
-// the browser doesn't support it (Firefox, older Safari) — caller renders
-// nothing in that case.
 const SpeechRecognitionImpl: any =
   typeof window !== 'undefined'
     ? (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
     : null;
 
-export function VoiceButton({ onTranscript, disabled }: Props) {
+export function VoiceButton({ onTranscript, disabled, silenceMs = 5000, lang }: Props) {
   const [listening, setListening] = useState(false);
   const [interim, setInterim] = useState('');
   const recognitionRef = useRef<any>(null);
+  // Accumulated final segments — committed with the trailing interim
+  // when silence triggers commit. Stored in a ref because the
+  // SpeechRecognition event handlers run outside React's render cycle.
+  const finalSegmentsRef = useRef<string[]>([]);
+  const interimRef = useRef('');
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Hidden entirely when unsupported — no UI noise, no console error.
   if (!SpeechRecognitionImpl) return null;
+
+  function clearSilenceTimer() {
+    if (silenceTimerRef.current !== null) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+  }
+
+  function commitAndStop() {
+    clearSilenceTimer();
+    const recognition = recognitionRef.current;
+    if (recognition) {
+      try { recognition.stop(); } catch { /* already stopped */ }
+    }
+    // The recognition.onend handler does the actual onTranscript fire
+    // and state cleanup so a single stop() vs a silence-timer-fired
+    // stop go through the same code path.
+  }
+
+  function scheduleSilenceCommit() {
+    clearSilenceTimer();
+    silenceTimerRef.current = setTimeout(() => {
+      commitAndStop();
+    }, silenceMs);
+  }
 
   function start() {
     const recognition = new SpeechRecognitionImpl();
-    recognition.lang = navigator.language || 'zh-CN';
-    recognition.continuous = false;
+    recognition.lang = lang || navigator.language || 'en-US';
+    // Continuous so the recognizer keeps listening across natural
+    // pauses; interimResults so we can show a live strip and reset
+    // the silence timer on partial words too.
+    recognition.continuous = true;
     recognition.interimResults = true;
 
-    let finalText = '';
+    finalSegmentsRef.current = [];
+    interimRef.current = '';
+    setInterim('');
 
     recognition.onresult = (event: any) => {
       let interimText = '';
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const result = event.results[i];
+        const transcript = result[0]?.transcript ?? '';
         if (result.isFinal) {
-          finalText += result[0].transcript;
+          finalSegmentsRef.current.push(transcript);
         } else {
-          interimText += result[0].transcript;
+          interimText += transcript;
         }
       }
+      interimRef.current = interimText;
       setInterim(interimText);
+      // Reset silence timer on EVERY result (interim or final). User
+      // saying anything = "still talking".
+      scheduleSilenceCommit();
     };
 
     recognition.onerror = (event: any) => {
-      // 'no-speech' / 'aborted' are normal user paths (silent click, manual stop) — silent.
-      if (event.error && event.error !== 'no-speech' && event.error !== 'aborted') {
+      // 'no-speech' is normal when the user clicks but doesn't talk —
+      // treated like a silent close (commit empty if anything bufferred,
+      // otherwise just stop). 'aborted' is the user clicking stop, also
+      // normal. 'audio-capture' / 'not-allowed' need surfacing.
+      const code = event?.error;
+      if (code && code !== 'no-speech' && code !== 'aborted') {
         import('./Toast.js').then(({ showToast }) => {
-          showToast(`Voice error: ${event.error}`);
+          showToast(`Voice error: ${code}`);
         });
       }
     };
 
     recognition.onend = () => {
-      const text = finalText.trim();
-      if (text) onTranscript(text);
+      clearSilenceTimer();
+      const finals = finalSegmentsRef.current.join(' ').trim();
+      const trailing = interimRef.current.trim();
+      const full = [finals, trailing].filter(Boolean).join(' ').trim();
+      finalSegmentsRef.current = [];
+      interimRef.current = '';
       setInterim('');
       setListening(false);
       recognitionRef.current = null;
+      if (full) onTranscript(full);
     };
 
     try {
       recognition.start();
       recognitionRef.current = recognition;
       setListening(true);
+      // Even if the user never says anything, commit-and-stop after
+      // silenceMs from the click. Without this, a click + never-speak
+      // would leave the mic open forever.
+      scheduleSilenceCommit();
     } catch {
-      // Some browsers throw if start() is called twice in quick succession.
       setListening(false);
     }
   }
 
   function stop() {
-    recognitionRef.current?.stop();
+    commitAndStop();
   }
 
   useEffect(() => {
-    return () => recognitionRef.current?.abort();
+    return () => {
+      clearSilenceTimer();
+      const recognition = recognitionRef.current;
+      if (recognition) {
+        try { recognition.abort(); } catch { /* ignore */ }
+      }
+    };
   }, []);
 
   return (
@@ -87,7 +169,7 @@ export function VoiceButton({ onTranscript, disabled }: Props) {
         disabled={disabled}
         onClick={listening ? stop : start}
         aria-label={listening ? 'Stop voice input' : 'Start voice input'}
-        title={listening ? 'Stop voice input' : 'Start voice input'}
+        title={listening ? 'Stop (commit now)' : 'Start streaming voice input'}
         className={`text-base leading-none w-9 h-9 flex items-center justify-center rounded-lg transition ${
           listening
             ? 'bg-red-100 text-red-600 animate-pulse'
@@ -96,9 +178,9 @@ export function VoiceButton({ onTranscript, disabled }: Props) {
       >
         🎤
       </button>
-      {listening && interim && (
+      {listening && (
         <div className="absolute left-3 right-3 -top-7 px-3 py-1 bg-accent-tint text-accent-deep text-[11px] italic rounded-full shadow-sm truncate pointer-events-none">
-          {interim}
+          {interim ? interim : 'Listening… (auto-sends after ~5s of silence)'}
         </div>
       )}
     </>
