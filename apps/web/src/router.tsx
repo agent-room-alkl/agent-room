@@ -7,6 +7,8 @@ import { Room } from './screens/Room.js';
 import { Report } from './screens/Report.js';
 import { Join } from './screens/Join.js';
 import { UnlockPending } from './screens/UnlockPending.js';
+import { TemplatesIndex } from './screens/TemplatesIndex.js';
+import { TemplateDetail } from './screens/TemplateDetail.js';
 import { ToastHost } from './components/Toast.js';
 import { Analytics } from './components/Analytics.js';
 
@@ -41,4 +43,7 @@ export const router = createBrowserRouter([
   { path: '/r/unlock-pending', element: <Layout><UnlockPending /></Layout> },
   { path: '/j/:code', element: <Layout><Join /></Layout> },
   { path: '/j', element: <Layout><Join /></Layout> },
+  // Plan B Phase 1: Live Session Templates pages (UI-only design preview).
+  { path: '/templates', element: <Layout><TemplatesIndex /></Layout> },
+  { path: '/templates/:slug', element: <Layout><TemplateDetail /></Layout> },
 ]);
