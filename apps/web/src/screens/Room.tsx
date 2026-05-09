@@ -52,6 +52,8 @@ export function Room() {
   const feedRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const activeAudioRef = useRef<HTMLAudioElement | null>(null);
+  const activeAudioUrlRef = useRef<string | null>(null);
 
   // Auto-grow the textarea: shrink to min, then expand to scrollHeight up to max.
   // Runs after every value change (typed, pasted, Draft injected, voice transcript).
@@ -114,29 +116,73 @@ export function Room() {
       m.name !== ownName,
     );
     if (!latestUnspoken) return;
-    spokenIdsRef.current.add(latestUnspoken.id);
-    setSpeakingMessageId(latestUnspoken.id);
+    const messageToSpeak = latestUnspoken;
+    spokenIdsRef.current.add(messageToSpeak.id);
+    setSpeakingMessageId(messageToSpeak.id);
 
     const fallback = window.setTimeout(
-      () => setSpeakingMessageId(curr => (curr === latestUnspoken.id ? null : curr)),
-      Math.max(8000, latestUnspoken.text.length * 90),
+      () => setSpeakingMessageId(curr => (curr === messageToSpeak.id ? null : curr)),
+      Math.max(8000, messageToSpeak.text.length * 90),
     );
 
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(latestUnspoken.text);
-    utterance.rate = 0.95;
-    utterance.pitch = 1;
-    utterance.onend = () => {
+    let cancelled = false;
+
+    function clearSpeaking() {
       window.clearTimeout(fallback);
-      setSpeakingMessageId(curr => (curr === latestUnspoken.id ? null : curr));
-    };
-    utterance.onerror = () => {
-      window.clearTimeout(fallback);
-      setSpeakingMessageId(curr => (curr === latestUnspoken.id ? null : curr));
-    };
-    window.setTimeout(() => window.speechSynthesis.speak(utterance), 120);
+      setSpeakingMessageId(curr => (curr === messageToSpeak.id ? null : curr));
+    }
+
+    async function playElevenLabsOrFallback() {
+      try {
+        const resp = await fetch('/api/elevenlabs-tts', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ text: messageToSpeak.text }),
+        });
+        const contentType = resp.headers.get('content-type') ?? '';
+        if (!resp.ok || !contentType.includes('audio/')) throw new Error('ElevenLabs unavailable');
+        const blob = await resp.blob();
+        if (cancelled) return;
+        if (activeAudioRef.current) {
+          activeAudioRef.current.pause();
+          activeAudioRef.current = null;
+        }
+        if (activeAudioUrlRef.current) {
+          URL.revokeObjectURL(activeAudioUrlRef.current);
+          activeAudioUrlRef.current = null;
+        }
+        const url = URL.createObjectURL(blob);
+        activeAudioUrlRef.current = url;
+        const audio = new Audio(url);
+        activeAudioRef.current = audio;
+        audio.onended = clearSpeaking;
+        audio.onerror = clearSpeaking;
+        await audio.play();
+        return;
+      } catch {
+        // Local vite dev does not serve Vercel functions, or the key may
+        // be missing. Fall back to browser TTS so the UX still works.
+      }
+
+      if (cancelled || !('speechSynthesis' in window)) {
+        clearSpeaking();
+        return;
+      }
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(messageToSpeak.text);
+      utterance.rate = 0.95;
+      utterance.pitch = 1;
+      utterance.onend = clearSpeaking;
+      utterance.onerror = clearSpeaking;
+      window.setTimeout(() => {
+        if (!cancelled) window.speechSynthesis.speak(utterance);
+      }, 120);
+    }
+
+    void playElevenLabsOrFallback();
 
     return () => {
+      cancelled = true;
       window.clearTimeout(fallback);
       // Don't kill the audio mid-effect-cleanup — React 18 strict-mode
       // would silence every line. Browser handles overlap when the next
