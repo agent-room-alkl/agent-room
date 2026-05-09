@@ -32,7 +32,7 @@ export function TemplateDetail() {
               </div>
             </div>
 
-            <VoiceDemoPanel />
+            <VoiceDemoPanel templateId={template.id} />
           </div>
         </section>
 
@@ -115,15 +115,24 @@ export function TemplateDetail() {
   );
 }
 
-function VoiceDemoPanel() {
+function VoiceDemoPanel({ templateId }: { templateId: string }) {
+  const isInterview = templateId === 'interview';
+
   return (
     <div className="border border-border bg-[#111318] p-5 text-white shadow-card">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <div className="text-[10px] font-semibold uppercase tracking-widest text-emerald-300">Voice demo shell</div>
-          <div className="mt-1 text-xl font-bold tracking-tight">Live interview in progress</div>
+          <div className="text-[10px] font-semibold uppercase tracking-widest text-emerald-300">
+            {isInterview ? 'AI interviewer listening' : 'Live session demo'}
+          </div>
+          <div className="mt-1 text-xl font-bold tracking-tight">
+            {isInterview ? 'Voice room with live AI follow-up' : 'Session in progress'}
+          </div>
         </div>
-        <div className="rounded-full bg-emerald-400/15 px-3 py-1 text-xs font-semibold text-emerald-200">Page demo</div>
+        <div className="flex items-center gap-2 rounded-full bg-emerald-400/15 px-3 py-1 text-xs font-semibold text-emerald-200">
+          <span className="h-2 w-2 rounded-full bg-emerald-300" />
+          <span>{isInterview ? 'Listening' : 'Page demo'}</span>
+        </div>
       </div>
 
       <div className="mt-6 grid gap-3 sm:grid-cols-[0.85fr_1.15fr]">
@@ -131,6 +140,23 @@ function VoiceDemoPanel() {
           <div className="text-[10px] font-semibold uppercase tracking-widest text-white/45">Candidate</div>
           <div className="mt-2 text-lg font-bold">Maya Chen</div>
           <div className="mt-1 text-sm text-white/65">Senior frontend engineer</div>
+          {isInterview && (
+            <div className="mt-5 border border-white/10 bg-black/20 p-3">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div className="text-xs font-semibold text-white/75">Candidate speaking</div>
+                <div className="text-[10px] font-semibold text-emerald-200">Voice input</div>
+              </div>
+              <div className="flex h-10 items-end gap-1">
+                {[22, 34, 18, 42, 30, 48, 26, 36, 20, 44, 28, 38].map((height, index) => (
+                  <div
+                    key={`${height}-${index}`}
+                    className="w-full rounded-t bg-emerald-300"
+                    style={{ height: `${height}px`, opacity: 0.45 + (index % 4) * 0.12 }}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
           <div className="mt-5 h-2 overflow-hidden rounded-full bg-white/10">
             <div className="h-full w-[68%] bg-emerald-300" />
           </div>
@@ -159,6 +185,38 @@ function VoiceDemoPanel() {
           ))}
         </div>
       </div>
+
+      {isInterview && (
+        <div className="mt-3 grid gap-3 lg:grid-cols-[1.1fr_0.9fr]">
+          <div className="border border-white/10 bg-white/5 p-4">
+            <div className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-white/45">
+              AI interviewer reply
+            </div>
+            <p className="text-sm leading-relaxed text-white/75">
+              You chose rollback first. Good. What signal told you it was safe to re-enable the flow after the feature flag fix?
+            </p>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <button className="rounded-md bg-emerald-300 px-3 py-2 text-xs font-bold text-[#111318]">Candidate answers by voice</button>
+              <button className="rounded-md border border-white/15 px-3 py-2 text-xs font-bold text-white/75">Type response</button>
+            </div>
+          </div>
+          <div className="border border-white/10 bg-white/5 p-4">
+            <div className="text-[10px] font-semibold uppercase tracking-widest text-white/45">Room agents</div>
+            <div className="mt-3 space-y-2">
+              {[
+                ['Interviewer', 'Asking follow-up'],
+                ['Evaluator', 'Scoring evidence'],
+                ['Hiring manager', 'Watching silently'],
+              ].map(([name, state]) => (
+                <div key={name} className="flex items-center justify-between gap-3 text-xs">
+                  <span className="font-semibold text-white/80">{name}</span>
+                  <span className="text-white/45">{state}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
