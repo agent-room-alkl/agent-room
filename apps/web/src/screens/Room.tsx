@@ -73,6 +73,103 @@ export function Room() {
   // --- Share ---
   const joinUrl = `${window.location.origin}/j/${code}`;
 
+  // --- Voice playback for AI (cc) messages ---
+  // Robin's product ask: "I want voice auto-play in the meeting room."
+  // Every time a NEW message from a cc-client participant arrives we
+  // speak it via the browser's built-in TTS (Web Speech API). Two
+  // guards make this safe in real rooms (which can have 50+ historical
+  // messages):
+  //   1. We baseline the highest message id we saw on first render
+  //      and ONLY speak ids strictly greater than that — so refreshing
+  //      a room with backlog doesn't replay every old AI line.
+  //   2. We dedupe via spokenIdsRef so re-renders or strict-mode
+  //      double-mounts can't double-fire.
+  // A fallback timer clears the speaking-id state in case onend never
+  // fires (some browsers swallow it on tab background).
+  const [speakingMessageId, setSpeakingMessageId] = useState<number | null>(null);
+  const spokenIdsRef = useRef<Set<number>>(new Set());
+  const baselineMaxIdRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+    if (messages.length === 0) return;
+    if (baselineMaxIdRef.current === null) {
+      // First batch: don't replay history. Mark everything we already
+      // see as "seen" so only future arrivals trigger autoplay.
+      const maxId = messages.reduce((max, m) => (m.id > max ? m.id : max), 0);
+      baselineMaxIdRef.current = maxId;
+      for (const m of messages) spokenIdsRef.current.add(m.id);
+      return;
+    }
+    const ownName = self?.name;
+    // Find the latest cc message we haven't spoken yet, and that
+    // arrived after our baseline. Speak only ONE per effect tick to
+    // avoid a backlog burst when the tab returns from background.
+    const latestUnspoken = [...messages].reverse().find(m =>
+      m.type === 'msg' &&
+      m.client === 'cc' &&
+      m.text.trim().length > 0 &&
+      m.id > (baselineMaxIdRef.current ?? 0) &&
+      !spokenIdsRef.current.has(m.id) &&
+      m.name !== ownName,
+    );
+    if (!latestUnspoken) return;
+    spokenIdsRef.current.add(latestUnspoken.id);
+    setSpeakingMessageId(latestUnspoken.id);
+
+    const fallback = window.setTimeout(
+      () => setSpeakingMessageId(curr => (curr === latestUnspoken.id ? null : curr)),
+      Math.max(8000, latestUnspoken.text.length * 90),
+    );
+
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(latestUnspoken.text);
+    utterance.rate = 0.95;
+    utterance.pitch = 1;
+    utterance.onend = () => {
+      window.clearTimeout(fallback);
+      setSpeakingMessageId(curr => (curr === latestUnspoken.id ? null : curr));
+    };
+    utterance.onerror = () => {
+      window.clearTimeout(fallback);
+      setSpeakingMessageId(curr => (curr === latestUnspoken.id ? null : curr));
+    };
+    window.setTimeout(() => window.speechSynthesis.speak(utterance), 120);
+
+    return () => {
+      window.clearTimeout(fallback);
+      // Don't kill the audio mid-effect-cleanup — React 18 strict-mode
+      // would silence every line. Browser handles overlap when the next
+      // effect fires its own cancel().
+    };
+  }, [messages, self?.name]);
+
+  // First-gesture unlock: most browsers refuse speak() until the user
+  // has clicked something on the page. We poke speechSynthesis with a
+  // silent utterance on the first pointerdown / keydown so subsequent
+  // auto-plays land without a per-message manual click.
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+    let unlocked = false;
+    const unlock = () => {
+      if (unlocked) return;
+      unlocked = true;
+      try {
+        const u = new SpeechSynthesisUtterance(' ');
+        u.volume = 0;
+        window.speechSynthesis.speak(u);
+      } catch { /* ignore */ }
+      window.removeEventListener('pointerdown', unlock, true);
+      window.removeEventListener('keydown', unlock, true);
+    };
+    window.addEventListener('pointerdown', unlock, true);
+    window.addEventListener('keydown', unlock, true);
+    return () => {
+      window.removeEventListener('pointerdown', unlock, true);
+      window.removeEventListener('keydown', unlock, true);
+    };
+  }, []);
+
   // --- End meeting ---
   const [ended, setEnded] = useState(false);
   const [showIdlePrompt, setShowIdlePrompt] = useState(false);
@@ -590,6 +687,7 @@ export function Room() {
                     message={m}
                     self={m.name === self.name}
                     ambiguousNames={ambiguousNames}
+                    speakingMessageId={speakingMessageId}
                   />
                 ));
               })()}

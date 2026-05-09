@@ -1,4 +1,5 @@
 import { Avatar } from './Avatar.js';
+import { AudioReplyBar } from './AudioReplyBar.js';
 import { useMemo, type ReactNode } from 'react';
 import type { Message, MessageAttachment } from '@agent-room/shared';
 import { normalizeEscapedWhitespace } from '@agent-room/shared';
@@ -10,9 +11,15 @@ interface Props {
   // "Robin · web" and "Robin · cc"), the parent passes the set of ambiguous
   // names so we can disambiguate by suffixing with the client kind.
   ambiguousNames?: Set<string>;
+  // The Room owns a single TTS pipeline and speaks the latest AI (cc)
+  // message that arrives after the page has settled. When `speakingMessageId`
+  // matches this bubble's id we light up the voice bar; either way, AI
+  // messages render the bar (so the user can see voice exists) and a
+  // per-bubble play button on it could replay historical turns later.
+  speakingMessageId?: number | null;
 }
 
-export function Bubble({ message, self, ambiguousNames }: Props) {
+export function Bubble({ message, self, ambiguousNames, speakingMessageId }: Props) {
   const row = self ? 'flex-row-reverse ml-auto' : '';
   const meta = self ? 'justify-end' : '';
   const bubble = self
@@ -33,6 +40,12 @@ export function Bubble({ message, self, ambiguousNames }: Props) {
           {message.text.trim() && <MessageText text={message.text} />}
           {message.attachments?.length ? <AttachmentList attachments={message.attachments} /> : null}
         </div>
+        {/* Voice indicator: render under any AI (cc) bubble. The Room
+            decides which message id is currently speaking via
+            speakingMessageId — Bubble itself is purely presentational. */}
+        {message.client === 'cc' && message.text.trim() && (
+          <AudioReplyBar active={speakingMessageId === message.id} />
+        )}
       </div>
     </div>
   );
