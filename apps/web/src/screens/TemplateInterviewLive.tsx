@@ -97,6 +97,13 @@ export function TemplateInterviewLive() {
 
   const [code, setCode] = useState<string | null>(null);
   const [setupError, setSetupError] = useState<string | null>(null);
+  // brief === null means the host hasn't submitted the setup form yet;
+  // brief === '' means submitted with no extra context (use the default
+  // SMB SaaS engineering persona). Gating room creation on brief !== null
+  // means the AI gets the host's tailoring on its very first turn rather
+  // than after the candidate has already started talking.
+  const [brief, setBrief] = useState<string | null>(null);
+  const [briefDraft, setBriefDraft] = useState('');
   const [candidateName] = useState<string>(() => {
     if (typeof sessionStorage === 'undefined') return DEFAULT_CANDIDATE_NAME;
     return sessionStorage.getItem('templates:interview:candidate') ?? DEFAULT_CANDIDATE_NAME;
@@ -123,6 +130,7 @@ export function TemplateInterviewLive() {
   const setupRef = useRef(false);
   useEffect(() => {
     if (setupRef.current) return;
+    if (brief === null) return; // wait for the host to submit the setup form
     setupRef.current = true;
 
     (async () => {
@@ -172,7 +180,7 @@ export function TemplateInterviewLive() {
         setSetupError(e instanceof Error ? e.message : String(e));
       }
     })();
-  }, [candidateName]);
+  }, [candidateName, brief]);
 
   const { room, messages, error: roomError } = useRoom(code ?? '', candidateName);
 
@@ -233,7 +241,7 @@ export function TemplateInterviewLive() {
           resp = await fetch('/api/interview-reply', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ code, transcript: transcriptForLLM, stage }),
+            body: JSON.stringify({ code, transcript: transcriptForLLM, stage, brief: brief ?? '' }),
           });
         } catch (e) {
           console.warn('[interview-reply] fetch threw, using client fallback', e);
@@ -275,7 +283,7 @@ export function TemplateInterviewLive() {
         setBusyReply(false);
       }
     },
-    [code, messages, candidateTurns],
+    [code, messages, candidateTurns, brief],
   );
 
   // After room setup, fire the opening turn once.
@@ -434,6 +442,62 @@ export function TemplateInterviewLive() {
     );
   }
 
+  if (brief === null) {
+    return (
+      <div className="min-h-screen bg-surface-soft">
+        <TopNav />
+        <main className="max-w-2xl mx-auto px-6 py-12">
+          <div className="bg-white border border-border rounded-2xl p-7 shadow-card">
+            <div className="flex items-center gap-3 mb-1">
+              <Link to="/templates" className="text-xs text-ink-faint hover:text-ink-muted">← Templates</Link>
+            </div>
+            <div className="flex items-start gap-4 mb-5 mt-3">
+              <span className="text-4xl leading-none">{t.emoji}</span>
+              <div>
+                <h1 className="text-2xl font-bold tracking-tight">{t.label}</h1>
+                <p className="text-sm text-ink-soft mt-0.5">{t.tagline}</p>
+              </div>
+            </div>
+
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-ink-faint mb-2">
+              Interview brief <span className="normal-case font-normal text-ink-faint">(optional)</span>
+            </h2>
+            <textarea
+              value={briefDraft}
+              onChange={(e) => setBriefDraft(e.target.value)}
+              placeholder={
+                "What role is this for? Any company context the AI should know, must-cover topics, or things to avoid?\n\n" +
+                "Example: Senior backend engineer, Python + Postgres + AWS. Probe API design and on-call instincts. We're a 40-person SaaS in fintech. Skip front-end depth. Don't share team names or comp."
+              }
+              rows={8}
+              maxLength={4000}
+              className="w-full resize-y px-3 py-2 bg-surface-softer border border-border rounded-lg text-sm leading-relaxed outline-none focus:border-accent focus:ring-2 focus:ring-accent-tint"
+            />
+            <div className="mt-1.5 flex items-center justify-between text-[11px] text-ink-faint">
+              <span>The candidate doesn't see this — only the AI uses it to tailor questions. Boundaries (no comp / individuals / financials / code generation) still apply regardless.</span>
+              <span className="font-mono shrink-0 ml-3">{briefDraft.length}/4000</span>
+            </div>
+
+            <div className="mt-6 flex flex-col sm:flex-row gap-2">
+              <button
+                onClick={() => setBrief(briefDraft.trim())}
+                className="flex-1 bg-accent text-white px-5 py-3 rounded-xl text-sm font-semibold hover:opacity-90 transition shadow-sm"
+              >
+                Start interview →
+              </button>
+              <button
+                onClick={() => { setBriefDraft(''); setBrief(''); }}
+                className="bg-white border border-border px-5 py-3 rounded-xl text-sm font-semibold text-ink-muted hover:bg-surface-soft transition"
+              >
+                Skip — use defaults
+              </button>
+            </div>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-surface-soft">
       <TopNav />
@@ -579,11 +643,11 @@ export function TemplateInterviewLive() {
                 className="w-full resize-none px-3 py-2 bg-surface-softer border border-border rounded-lg text-sm leading-relaxed outline-none focus:border-accent focus:ring-2 focus:ring-accent-tint disabled:opacity-50"
               />
               <div className="flex items-center justify-end gap-2 relative">
-                {/* Mic — clicks SpeechRecognition; final transcript auto-
-                    sends as a candidate message. Real-time interview feel:
-                    speak, the AI hears, the AI replies with voice. Falls
-                    silent on browsers without SpeechRecognition support
-                    (Firefox / older Safari). */}
+                {/* Mic — records audio with MediaRecorder, sends to
+                    /api/stt (ElevenLabs Scribe) on a 5-second silence
+                    boundary, and the final transcript auto-sends as a
+                    candidate message. Real-time interview feel: speak,
+                    the AI hears, the AI replies with voice. */}
                 <VoiceButton
                   onTranscript={(t) => { void sendCandidate(t); }}
                   disabled={!code}
