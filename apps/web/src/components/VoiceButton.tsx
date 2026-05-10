@@ -25,6 +25,9 @@ interface Props {
    *  the current turn is committed. Default 5000 — Robin's "等我不说话
    *  大概5秒后才结束". */
   silenceMs?: number;
+  /** Hard upper bound for one hot-mic turn. Prevents background media
+   *  or nonstop speech from turning into one giant room message. */
+  maxTurnMs?: number;
   /** Optional language hint passed to Scribe as `language_code` (e.g.
    *  'zh', 'en'). Omit to let Scribe auto-detect. */
   lang?: string;
@@ -39,8 +42,23 @@ const SILENCE_RMS = 0.02;
 // Minimum recording duration before we'll commit. Stops the recorder
 // from posting half-second blobs of throat-clearing.
 const MIN_TURN_MS = 600;
+const DEFAULT_MAX_TURN_MS = 90_000;
 
-export function VoiceButton({ onTranscript, disabled, silenceMs = 5000, lang }: Props) {
+const AUDIO_EVENT_TAG_RE = /[\[(（【][^\])）】]{1,32}[\])）】]/gu;
+
+function normalizeTranscript(raw: string): string {
+  return raw
+    .replace(AUDIO_EVENT_TAG_RE, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function hasMeaningfulTranscript(text: string): boolean {
+  const compact = text.replace(/[^\p{L}\p{N}]+/gu, '');
+  return compact.length >= 2;
+}
+
+export function VoiceButton({ onTranscript, disabled, silenceMs = 5000, maxTurnMs = DEFAULT_MAX_TURN_MS, lang }: Props) {
   // Three-state lifecycle: 'idle' (mic off), 'recording' (capturing
   // audio), 'transcribing' (audio uploaded, waiting on Scribe). We
   // surface this on the button so the user knows the system isn't
@@ -191,12 +209,20 @@ export function VoiceButton({ onTranscript, disabled, silenceMs = 5000, lang }: 
       const rms = Math.sqrt(sum / buf.length);
       setMeter(Math.min(1, rms * 12)); // scale up for visual punch
       const now = Date.now();
+      const recorder = recorderRef.current;
+      if (now - turnStartRef.current >= maxTurnMs) {
+        silenceStartRef.current = null;
+        if (recorder && recorder.state === 'recording') {
+          try { recorder.stop(); } catch { /* ignore */ }
+        }
+        rafRef.current = requestAnimationFrame(tick);
+        return;
+      }
       if (rms < SILENCE_RMS) {
         if (silenceStartRef.current === null) silenceStartRef.current = now;
         else if (now - silenceStartRef.current >= silenceMs) {
           // Commit current turn.
           silenceStartRef.current = null;
-          const recorder = recorderRef.current;
           if (recorder && recorder.state === 'recording') {
             try { recorder.stop(); } catch { /* ignore */ }
           }
@@ -222,8 +248,8 @@ export function VoiceButton({ onTranscript, disabled, silenceMs = 5000, lang }: 
       });
       if (resp.ok) {
         const body = (await resp.json()) as { text?: string };
-        const text = (body.text ?? '').trim();
-        if (text) onTranscript(text);
+        const text = normalizeTranscript(body.text ?? '');
+        if (hasMeaningfulTranscript(text)) onTranscript(text);
       } else {
         // Surface but keep mic hot — user can try again.
         const detail = await resp.text().catch(() => '');
@@ -290,6 +316,7 @@ export function VoiceButton({ onTranscript, disabled, silenceMs = 5000, lang }: 
   }, []);
 
   const sec = Math.floor(elapsedMs / 1000);
+  const maxSec = Math.round(maxTurnMs / 1000);
   const elapsedLabel = state === 'recording'
     ? `${sec}s`
     : state === 'transcribing'
@@ -331,7 +358,7 @@ export function VoiceButton({ onTranscript, disabled, silenceMs = 5000, lang }: 
                   />
                 ))}
               </span>
-              <span className="truncate">Listening… {elapsedLabel} (auto-sends after ~{Math.round(silenceMs / 1000)}s of silence)</span>
+              <span className="truncate">Listening… {elapsedLabel} (auto-sends after ~{Math.round(silenceMs / 1000)}s silence, max {maxSec}s)</span>
             </>
           )}
           {state === 'transcribing' && (
