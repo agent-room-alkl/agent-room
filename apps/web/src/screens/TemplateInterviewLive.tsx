@@ -1,29 +1,39 @@
-// Plan B Phase 1+ — /templates/interview live demo.
+// Plan B Phase 1+ — /templates/interview host monitor.
 //
-// Replaces the static mock for slug=interview with a *real* Agent Room
-// the visitor can chat with. On mount this component:
-//   1. Picks a candidate display name (from sessionStorage or "Candidate").
-//   2. createRoom() — a new ephemeral room scoped to this demo session.
-//   3. joinRoom() the candidate as a web participant.
-//   4. joinRoom() an "AI Interviewer" cc participant.
-//   5. POSTs to /api/interview-reply with stage=opening, then
-//      appendMessage()s the returned line as the Interviewer's first turn.
+// Two-step flow, both rendered by this same component:
+//   /templates/interview        → host setup form (interview brief)
+//   /templates/interview/:code  → host monitor view (transcript +
+//                                 candidate share link + host-note input)
 //
-// After that the page is a normal Agent Room: useRoom polls the
-// transcript, the candidate types into a textarea, and every time a new
-// candidate message appears in the live transcript we POST to
-// /api/interview-reply and append the response. Stage advances based
-// on the candidate-turn count so the interview wraps up cleanly.
+// Host setup → on Start:
+//   1. createRoom() with a fresh code, host as the creator.
+//   2. joinRoom() the host as a web participant with role='Host'.
+//   3. joinRoom() the AI Interviewer as a cc participant.
+//   4. Persist the brief to sessionStorage keyed by room code.
+//   5. Soft-navigate to /templates/interview/:code so a refresh restores
+//      the monitor view.
 //
-// Critical property: the room is REAL. Two browsers can both watch the
-// same demo room (the host's window + the candidate's link), the URL
-// can be shared, the export pipeline (room_export → /r/CODE/report)
-// works, and the AI's lines are real messages stored in Upstash. This
-// is what Robin asked for after the static mock failed his read: "the
-// room should have an AI in it, not pretend."
+// Host monitor view:
+//   - Renders the live transcript (host notes labeled, AI replies played).
+//   - Shows the share link the host gives the candidate (/r/:code).
+//   - Drives the AI: only this browser POSTs /api/interview-reply, so
+//     brief stays in host scope and per-IP cost caps apply once.
+//
+// Candidate flow:
+//   - Candidate opens /r/:code (existing Room.tsx).
+//   - They post messages as a web participant; speakerForMessage()
+//     resolves them to 'candidate' on the host side, which advances
+//     the interview stage and triggers the next AI question.
+//   - Candidate doesn't see the brief; the AI reads it via the host
+//     browser only.
+//
+// Critical property held since the original demo: the room is REAL.
+// Two browsers (host + candidate) participate in one Upstash-backed
+// room, the export pipeline (room_export → /r/CODE/report) works, and
+// every AI line is a real message in storage.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   appendMessage,
   createClient,
@@ -36,14 +46,16 @@ import { colorForName, initialsFor } from '../lib/colors.js';
 import { useRoom } from '../hooks/useRoom.js';
 import { TopNav } from '../components/TopNav.js';
 import { AudioReplyBar } from '../components/AudioReplyBar.js';
-import { VoiceButton } from '../components/VoiceButton.js';
 import { templateBySlug } from '../lib/liveTemplates.js';
+import { copyText } from '../lib/copy.js';
+
+const HOST_NAME = 'Host';
+const briefStorageKey = (code: string) => `agent-room:interview-brief:${code}`;
 
 type Stage = 'opening' | 'depth' | 'tradeoffs' | 'behavioral' | 'wrap';
 type InterviewSpeaker = 'host' | 'candidate' | 'interviewer';
 
 const INTERVIEWER_NAME = 'AI Interviewer';
-const DEFAULT_CANDIDATE_NAME = 'Candidate';
 
 function pickStage(candidateTurns: number): Stage {
   if (candidateTurns <= 0) return 'opening';
@@ -89,11 +101,13 @@ function clientLadderLine(
   return lines[Math.min(interviewerSoFar, lines.length - 1)] ?? lines[0]!;
 }
 
-function speakerForMessage(message: Message, candidateName: string): InterviewSpeaker {
+function speakerForMessage(message: Message): InterviewSpeaker {
   if (message.name === INTERVIEWER_NAME && message.client === 'cc') return 'interviewer';
-  if (message.name === candidateName && message.role === 'Candidate') return 'candidate';
   if (message.role === 'Host' || message.role === 'host') return 'host';
-  if (message.client === 'web') return 'host';
+  // Everyone else on web is the candidate (they joined via /r/:code
+  // and chose their own name there). Non-web non-host non-AI clients
+  // (e.g. an MCP-driven scorer agent down the road) also fall here for
+  // now and would need their own role check before they're added.
   return 'candidate';
 }
 
@@ -104,19 +118,38 @@ export function TemplateInterviewLive() {
   // running today.
   const t = useMemo(() => templateBySlug('interview'), []);
 
-  const [code, setCode] = useState<string | null>(null);
+  // urlCode === string when we're on /templates/interview/:code (host
+  // monitor view, room already created); undefined when we're on the
+  // bare /templates/interview setup form. The same component handles
+  // both because the setup step soft-navigates into the monitor URL
+  // after createRoom — keeping component state intact across the route
+  // change. A fresh mount on /:code (e.g. host refreshed) hits the
+  // urlCode branch in the setup effect below and skips createRoom.
+  const { code: urlCode } = useParams<{ code: string }>();
+  const navigate = useNavigate();
+
+  const [code, setCode] = useState<string | null>(urlCode ?? null);
   const [setupError, setSetupError] = useState<string | null>(null);
   // brief === null means the host hasn't submitted the setup form yet;
   // brief === '' means submitted with no extra context (use the default
   // SMB SaaS engineering persona). Gating room creation on brief !== null
   // means the AI gets the host's tailoring on its very first turn rather
-  // than after the candidate has already started talking.
-  const [brief, setBrief] = useState<string | null>(null);
-  const [briefDraft, setBriefDraft] = useState('');
-  const [candidateName] = useState<string>(() => {
-    if (typeof sessionStorage === 'undefined') return DEFAULT_CANDIDATE_NAME;
-    return sessionStorage.getItem('templates:interview:candidate') ?? DEFAULT_CANDIDATE_NAME;
+  // than after the candidate has already started talking. On a fresh
+  // mount of /templates/interview/:code we hydrate brief from
+  // sessionStorage (Codex's suggestion: refresh-safe without a server
+  // schema change).
+  const [brief, setBrief] = useState<string | null>(() => {
+    if (!urlCode) return null;
+    if (typeof sessionStorage === 'undefined') return '';
+    return sessionStorage.getItem(briefStorageKey(urlCode)) ?? '';
   });
+  const [briefDraft, setBriefDraft] = useState('');
+  // The visitor of /templates/interview is always the Host, not a
+  // candidate. Candidates land via the share link → /r/:code (existing
+  // Room.tsx). The HOST_NAME constant keeps speakerForMessage's
+  // role-based heuristic consistent so the host's notes don't get
+  // counted as candidate answers in scorecard logic later.
+  const candidateName = HOST_NAME;
   const [usingLiveLLM, setUsingLiveLLM] = useState<boolean | null>(null);
   const [draft, setDraft] = useState('');
   const [busyReply, setBusyReply] = useState(false);
@@ -139,7 +172,19 @@ export function TemplateInterviewLive() {
   const setupRef = useRef(false);
   useEffect(() => {
     if (setupRef.current) return;
-    if (brief === null) return; // wait for the host to submit the setup form
+
+    // Host-monitor mount: /templates/interview/:code refresh case. Room
+    // already exists (created during a previous setup submit); we just
+    // need to populate `code` so useRoom starts polling. Brief was
+    // hydrated from sessionStorage in the initial state above.
+    if (urlCode) {
+      setupRef.current = true;
+      setCode(urlCode);
+      return;
+    }
+
+    // Setup form mount: wait for the host to submit the brief.
+    if (brief === null) return;
     setupRef.current = true;
 
     (async () => {
@@ -148,25 +193,27 @@ export function TemplateInterviewLive() {
         const client = createClient(ENV.upstash);
         await createRoom(client, {
           code: newCode,
-          topic: 'AI Interview Demo — Senior Engineer',
-          createdBy: candidateName,
+          topic: 'AI Interview',
+          createdBy: HOST_NAME,
         });
-        // Join self as candidate (web). createRoom already adds the
-        // host (candidate) as the first participant, but we joinRoom
-        // again with priorIdentity so refreshes don't add a "(2)".
+        // Join self as Host (web). createRoom already adds the creator
+        // as the first participant, but we joinRoom again with
+        // priorIdentity so refreshes don't add a "(2)". The candidate
+        // doesn't join here — they land on /r/:code via the share link
+        // and pick their own display name there.
         await joinRoom(
           client,
           newCode,
           {
-            name: candidateName,
-            role: 'Candidate',
-            color: colorForName(candidateName),
-            initials: initialsFor(candidateName),
+            name: HOST_NAME,
+            role: 'Host',
+            color: colorForName(HOST_NAME),
+            initials: initialsFor(HOST_NAME),
             client: 'web',
             joinedAt: Date.now(),
             lastSeenAt: Date.now(),
           },
-          { priorIdentity: { name: candidateName, client: 'web' } },
+          { priorIdentity: { name: HOST_NAME, client: 'web' } },
         );
         // Add the AI Interviewer as a cc participant — same machinery
         // any MCP-driven agent uses, just driven from the browser.
@@ -184,17 +231,29 @@ export function TemplateInterviewLive() {
           },
           { priorIdentity: { name: INTERVIEWER_NAME, client: 'cc' } },
         );
+        // Persist brief so a host refresh on /templates/interview/:code
+        // restores the same context without re-prompting.
+        if (typeof sessionStorage !== 'undefined') {
+          try { sessionStorage.setItem(briefStorageKey(newCode), brief ?? ''); } catch {}
+        }
         setCode(newCode);
+        // Soft-navigate into the monitor URL. Same component instance
+        // continues — `setupRef.current` is already true so this effect
+        // doesn't re-fire on the route change.
+        navigate(`/templates/interview/${newCode}`, { replace: true });
       } catch (e) {
         setSetupError(e instanceof Error ? e.message : String(e));
       }
     })();
-  }, [candidateName, brief]);
+  }, [urlCode, brief, navigate]);
 
   const { room, messages, error: roomError } = useRoom(code ?? '', candidateName);
 
+  // Count messages whose speaker resolves to 'candidate' — the actual
+  // interviewee joining via /r/:code, not the host's own notes. Stage
+  // progression keys off this, so getting the count right matters.
   const candidateTurns = useMemo(
-    () => messages.filter(m => m.type === 'msg' && m.client === 'web' && m.name === candidateName).length,
+    () => messages.filter(m => m.type === 'msg' && speakerForMessage(m) === 'candidate').length,
     [messages, candidateName],
   );
   const latestInterviewerMessage = useMemo(
@@ -242,7 +301,7 @@ export function TemplateInterviewLive() {
         const transcriptForLLM = messages
           .filter(m => m.type === 'msg')
           .map(m => ({
-            speaker: speakerForMessage(m, candidateName),
+            speaker: speakerForMessage(m),
             text: m.text,
           }));
         let resp: Response | null = null;
@@ -310,12 +369,19 @@ export function TemplateInterviewLive() {
   }, [code, messages.length]);
 
   // After every new candidate message that we haven't replied to yet,
-  // fire the next interviewer turn.
+  // fire the next interviewer turn. Candidate is identified by
+  // speakerForMessage (role-based), not by name — the candidate
+  // chose their own display name when joining /r/:code so we can't
+  // match on `name === candidateName` here.
+  //
+  // Only the host browser runs this trigger logic — the candidate's
+  // /r/:code Room.tsx never calls /api/interview-reply, which keeps
+  // brief, LLM cost, and turn pacing on a single trusted controller.
   useEffect(() => {
     if (!code) return;
     if (busyReply) return;
     const lastCandidate = [...messages].reverse().find(m =>
-      m.type === 'msg' && m.client === 'web' && m.name === candidateName,
+      m.type === 'msg' && speakerForMessage(m) === 'candidate',
     );
     if (!lastCandidate) return;
     if (repliedToRef.current.has(lastCandidate.id)) return;
@@ -409,22 +475,25 @@ export function TemplateInterviewLive() {
     };
   }, [latestInterviewerMessage]);
 
-  // Optional explicit text lets the mic auto-send a recognized
-  // transcript without going through the input field at all. Default
-  // pulls from `draft` (the typed input).
-  async function sendCandidate(explicitText?: string) {
+  // Send a Host note. Posted as role='Host' so speakerForMessage()
+  // resolves to 'host' on every consumer (transcript label, scorecard
+  // logic, /api/interview-reply schema). A host note is visible to
+  // both the candidate and the AI; the AI treats it as context, not
+  // as a candidate answer (see the host-as-context handling in
+  // api/interview-reply.ts post-A6d2d46a).
+  async function sendHostNote() {
     unlockSpeech();
-    const text = (explicitText ?? draft).trim();
+    const text = draft.trim();
     if (!code || !text) return;
-    if (!explicitText) setDraft('');
+    setDraft('');
     const client = createClient(ENV.upstash);
     const msg: Message = {
       id: Date.now(),
       type: 'msg',
-      name: candidateName,
-      role: 'Candidate',
-      color: colorForName(candidateName),
-      initials: initialsFor(candidateName),
+      name: HOST_NAME,
+      role: 'Host',
+      color: colorForName(HOST_NAME),
+      initials: initialsFor(HOST_NAME),
       client: 'web',
       text,
       time: Date.now(),
@@ -432,7 +501,7 @@ export function TemplateInterviewLive() {
     try {
       await appendMessage(client, code, msg);
     } catch (e) {
-      console.error('[interview send] failed', e);
+      console.error('[host note send] failed', e);
     }
   }
 
@@ -545,16 +614,15 @@ export function TemplateInterviewLive() {
             </div>
           </div>
           <p className="text-sm text-slate-300 max-w-2xl mt-3 leading-relaxed">
-            This is a working demo. The room you see below is a real Agent Room — both you and the
-            AI Interviewer are participants. Chat to it; the answers come from a real model when
-            <code className="mx-1 text-[12px] bg-slate-800/60 px-1.5 py-0.5 rounded">ANTHROPIC_API_KEY</code>
-            is set, otherwise from a scripted ladder so you can still see the shape end-to-end.
+            You're the host. Share the candidate link below and the AI Interviewer will run the
+            screen with whoever joins. You stay an observer here — your messages post as Host
+            notes the AI uses for context, never as candidate answers in the scorecard.
           </p>
           {code && (
             <p className="text-[11px] text-slate-500 mt-3 font-mono">
               Room: <Link to={`/r/${code}`} className="text-slate-300 hover:text-white underline">/r/{code}</Link>
               {' · '}
-              <Link to={`/r/${code}/report`} className="text-slate-300 hover:text-white underline">view scorecard once you wrap</Link>
+              <Link to={`/r/${code}/report`} className="text-slate-300 hover:text-white underline">view scorecard once the interview wraps</Link>
             </p>
           )}
         </div>
@@ -600,7 +668,7 @@ export function TemplateInterviewLive() {
             <ol className="flex-1 space-y-4 overflow-y-auto pr-1 max-h-[480px]">
               {messages.filter(m => m.type === 'msg').map(m => (
                 (() => {
-                  const speaker = speakerForMessage(m, candidateName);
+                  const speaker = speakerForMessage(m);
                   return (
                     <li key={m.id} className="flex gap-3">
                       <div
@@ -647,7 +715,33 @@ export function TemplateInterviewLive() {
               )}
             </ol>
 
-            <div className="border-t border-border-faint pt-3 mt-3 flex flex-col gap-2">
+            <div className="border-t border-border-faint pt-3 mt-3 flex flex-col gap-3">
+              {code && (
+                <div className="bg-accent-tint border border-accent-tint-border rounded-lg p-3 flex flex-col gap-2">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-accent-deep">
+                    Candidate share link
+                  </div>
+                  <div className="flex items-stretch gap-2">
+                    <input
+                      readOnly
+                      value={`${typeof window === 'undefined' ? '' : window.location.origin}/r/${code}`}
+                      onFocus={(e) => e.currentTarget.select()}
+                      className="flex-1 min-w-0 font-mono text-[12px] px-2.5 py-1.5 bg-white border border-accent-tint-border rounded-md text-ink-soft outline-none focus:border-accent"
+                    />
+                    <button
+                      onClick={() => copyText(`${window.location.origin}/r/${code}`, 'Link copied')}
+                      className="shrink-0 bg-accent text-white px-3 py-1.5 rounded-md text-[11px] font-semibold hover:opacity-90 transition"
+                    >
+                      Copy
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-ink-soft leading-snug">
+                    Send this link to the candidate. They join from any browser — no signup. The
+                    AI Interviewer is already in the room; the screen begins as soon as they say
+                    hello.
+                  </p>
+                </div>
+              )}
               <textarea
                 value={draft}
                 onFocus={unlockSpeech}
@@ -655,30 +749,21 @@ export function TemplateInterviewLive() {
                 onKeyDown={e => {
                   if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                     e.preventDefault();
-                    void sendCandidate();
+                    void sendHostNote();
                   }
                 }}
-                placeholder={code ? 'Type your answer… (Enter to send, Shift+Enter for newline)' : 'Setting up…'}
+                placeholder={code ? 'Add a host note (visible to AI as context, also visible to the candidate). Optional.' : 'Setting up…'}
                 rows={2}
                 disabled={!code}
                 className="w-full resize-none px-3 py-2 bg-surface-softer border border-border rounded-lg text-sm leading-relaxed outline-none focus:border-accent focus:ring-2 focus:ring-accent-tint disabled:opacity-50"
               />
               <div className="flex items-center justify-end gap-2 relative">
-                {/* Mic — records audio with MediaRecorder, sends to
-                    /api/stt (ElevenLabs Scribe) on a 5-second silence
-                    boundary, and the final transcript auto-sends as a
-                    candidate message. Real-time interview feel: speak,
-                    the AI hears, the AI replies with voice. */}
-                <VoiceButton
-                  onTranscript={(t) => { void sendCandidate(t); }}
-                  disabled={!code}
-                />
                 <button
-                  onClick={() => void sendCandidate()}
+                  onClick={() => void sendHostNote()}
                   disabled={!code || !draft.trim()}
-                  className="bg-accent text-white px-4 py-1.5 rounded-lg text-xs font-semibold disabled:opacity-50"
+                  className="bg-ink text-white px-4 py-1.5 rounded-lg text-xs font-semibold disabled:opacity-50"
                 >
-                  Send
+                  Post host note
                 </button>
               </div>
             </div>

@@ -76,6 +76,14 @@ export const router = createBrowserRouter([
   // Interview gets a *live* room (real Agent Room + scripted-or-LLM AI
   // Interviewer) so visitors can chat with it. Other templates render
   // the static design-preview page until we promote them to live.
+  //
+  // Two-step flow:
+  //   /templates/interview        → host setup (brief textarea), creates
+  //                                 room on submit, then redirects to:
+  //   /templates/interview/:code  → host monitor view (transcript +
+  //                                 share link + host-note input). The
+  //                                 candidate joins via /r/:code.
   { path: '/templates/interview', element: <Layout><TemplateInterviewLive /></Layout> },
+  { path: '/templates/interview/:code', element: <Layout><TemplateInterviewLive /></Layout> },
   { path: '/templates/:slug', element: <Layout><TemplateDetail /></Layout> },
 ]);
