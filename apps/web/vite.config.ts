@@ -202,13 +202,118 @@ function elevenLabsSttDevPlugin(env: Record<string, string>): Plugin {
   };
 }
 
+// Local-dev proxy for /api/interview-reply (the AI Interviewer brain).
+// Mirrors the production handler in api/interview-reply.ts: same model
+// id (claude-haiku-4-5), same system prompt, same request shape. Kept
+// inline rather than SSR-importing api/interview-reply.ts so this file
+// follows the same pattern as the other two dev plugins above; the
+// trade-off is that the SYSTEM_PROMPT is duplicated and must be kept in
+// sync with the prod handler.
+function interviewReplyDevPlugin(env: Record<string, string>): Plugin {
+  const SYSTEM_PROMPT = `You are an AI interviewer running a 20-minute first-round screen for a software engineering role at an SMB SaaS company. You stay neutral, ask one question at a time, and probe for trade-off awareness, debugging instincts, and self-awareness about what didn't go well.
+
+Style rules:
+- Each turn is one focused question or follow-up. No prefaces, no "great answer!", no over-warmth.
+- When the candidate gives a vague answer, push for specifics — "what did you give up", "who pushed back", "what tipped it".
+- Stay under 60 words per turn unless the question genuinely needs setup.
+- Never invent rapport ("nice to meet you" is fine; "I love your background!" is not).
+- End the interview cleanly when the page says stage=wrap; thank the candidate, mention the scorecard will follow.
+- You will NOT see the candidate's resume — you only have the live transcript. Ask questions that work without prior context.`;
+
+  return {
+    name: 'agent-room:interview-reply-dev',
+    apply: 'serve',
+    configureServer(server: ViteDevServer) {
+      server.middlewares.use('/api/interview-reply', async (req, res) => {
+        if (req.method !== 'POST') {
+          res.statusCode = 405;
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify({ error: 'method_not_allowed' }));
+          return;
+        }
+        const apiKey = env.ANTHROPIC_API_KEY;
+        if (!apiKey) {
+          // No key locally — the page falls back to its own client-side
+          // scripted ladder, same as production behavior when the env
+          // var is unset. Surfaced as 503 so the page sees a recognizable
+          // error and switches to fallback explicitly.
+          res.statusCode = 503;
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify({ error: 'interviewer_not_configured', message: 'Set ANTHROPIC_API_KEY in apps/web/.env.local to enable the live interviewer LLM locally.' }));
+          return;
+        }
+        const chunks: Buffer[] = [];
+        for await (const c of req) chunks.push(Buffer.from(c));
+        let body: { transcript?: { speaker: 'candidate' | 'interviewer'; text: string }[]; stage?: string } = {};
+        try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch {
+          res.statusCode = 400;
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify({ error: 'bad_json' }));
+          return;
+        }
+        const transcript = Array.isArray(body.transcript) ? body.transcript : [];
+        const stage = body.stage ?? (transcript.length === 0 ? 'opening' : 'depth');
+
+        const messages: { role: 'user' | 'assistant'; content: string }[] = transcript.map(m => ({
+          role: m.speaker === 'candidate' ? 'user' : 'assistant',
+          content: m.text,
+        }));
+        if (stage === 'wrap') {
+          messages.push({ role: 'user', content: '[stage: wrap — close out the interview cleanly in 1-2 turns.]' });
+        } else if (stage === 'opening' && transcript.length === 0) {
+          messages.push({ role: 'user', content: '[stage: opening — open the interview.]' });
+        }
+
+        const upstream = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify({
+            model: 'claude-haiku-4-5',
+            max_tokens: 400,
+            system: SYSTEM_PROMPT,
+            messages: messages.length > 0 ? messages : [{ role: 'user', content: '[stage: opening — open the interview.]' }],
+          }),
+        });
+        if (!upstream.ok) {
+          const detail = await upstream.text().catch(() => '');
+          res.statusCode = upstream.status;
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify({ error: 'anthropic_error', message: detail.slice(0, 500) }));
+          return;
+        }
+        let json: { content?: { type: string; text: string }[] } = {};
+        try { json = await upstream.json() as { content?: { type: string; text: string }[] }; } catch {
+          res.statusCode = 502;
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify({ error: 'anthropic_bad_response' }));
+          return;
+        }
+        const text = (json.content ?? []).filter(c => c?.type === 'text').map(c => c.text).join('').trim();
+        res.statusCode = 200;
+        res.setHeader('content-type', 'application/json');
+        res.setHeader('cache-control', 'no-store');
+        res.end(JSON.stringify({ text, ai: true, stage }));
+      });
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => {
   // Pull env vars from .env.local etc. so the dev plugins can read
-  // ELEVENLABS_API_KEY without leaking it to the client bundle —
-  // loadEnv only loads the string keys we ask for.
-  const env = loadEnv(mode, process.cwd(), 'ELEVENLABS_');
+  // their respective API keys without leaking them to the client
+  // bundle. loadEnv only loads keys matching the prefix list.
+  const env = loadEnv(mode, process.cwd(), ['ELEVENLABS_', 'ANTHROPIC_']);
   return {
-    plugins: [react(), elevenLabsTtsDevPlugin(env), elevenLabsSttDevPlugin(env)],
+    plugins: [
+      react(),
+      elevenLabsTtsDevPlugin(env),
+      elevenLabsSttDevPlugin(env),
+      interviewReplyDevPlugin(env),
+    ],
     server: { port: 5173 },
   };
 });
