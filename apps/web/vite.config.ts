@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { defineConfig, loadEnv, type Plugin, type ViteDevServer } from 'vite';
 import react from '@vitejs/plugin-react';
 
@@ -340,7 +341,8 @@ export default defineConfig(({ mode }) => {
   // Pull env vars from .env.local etc. so the dev plugins can read
   // their respective API keys without leaking them to the client
   // bundle. loadEnv only loads keys matching the prefix list.
-  const env = loadEnv(mode, process.cwd(), ['ELEVENLABS_', 'ANTHROPIC_']);
+  const envDir = fileURLToPath(new URL('.', import.meta.url));
+  const env = loadEnv(mode, envDir, ['ELEVENLABS_', 'ANTHROPIC_']);
   return {
     plugins: [
       react(),
