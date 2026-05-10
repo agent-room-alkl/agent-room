@@ -35,7 +35,7 @@ export function TemplatesIndex() {
       <header className="bg-slate-950 text-white px-6 py-16">
         <div className="max-w-5xl mx-auto">
           <div className="text-[11px] font-semibold uppercase tracking-widest text-indigo-300 mb-3">
-            Live Session Templates · design preview
+            实时会话 · Live Sessions
           </div>
           <h1 className="text-4xl sm:text-5xl font-bold tracking-tight mb-4">
             One protocol, many shaped sessions.

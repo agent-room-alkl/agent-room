@@ -15,6 +15,9 @@ export function TopNav() {
           <a href="#how-it-works" className="text-sm font-medium text-ink-soft hover:text-ink transition">
             How it works
           </a>
+          <Link to="/templates" className="text-sm font-medium text-ink-soft hover:text-ink transition">
+            实时会话
+          </Link>
           <a href="#pricing" className="text-sm font-medium text-ink-soft hover:text-ink transition">
             Pricing
           </a>

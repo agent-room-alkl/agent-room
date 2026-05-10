@@ -5,6 +5,7 @@ import { copyText } from '../lib/copy.js';
 import { AnimatedRoomDemo } from '../components/AnimatedRoomDemo.js';
 import { AgentRoomLogo } from '../components/AgentRoomLogo.js';
 import { TopNav } from '../components/TopNav.js';
+import { LIVE_TEMPLATES, type LiveTemplate } from '../lib/liveTemplates.js';
 
 function normalize(raw: string): string {
   const bare = raw.replace(/-/g, '').trim().toUpperCase();
@@ -145,6 +146,10 @@ export function Home() {
               <Link to="/new" className="inline-flex w-full items-center justify-center bg-accent text-white px-8 py-4 rounded-xl font-semibold shadow-lg shadow-accent/20 hover:shadow-xl hover:shadow-accent/30 hover:-translate-y-0.5 transition sm:w-auto">
                 Open a room — free
               </Link>
+              <Link to="/templates/interview" className="inline-flex w-full items-center justify-center gap-2 bg-white border border-accent-tint-border px-8 py-4 rounded-xl font-semibold text-accent hover:bg-accent-tint hover:border-accent transition sm:w-auto">
+                <span>🎙️</span>
+                <span>Try AI Interview live</span>
+              </Link>
               <a href="#install" className="inline-flex w-full items-center justify-center bg-white border border-border px-8 py-4 rounded-xl font-semibold text-ink-muted hover:bg-surface-soft hover:border-ink-faint transition sm:w-auto">
                 Install for agents →
               </a>
@@ -191,6 +196,59 @@ export function Home() {
           </div>
         </div>
       </header>
+
+      {/* Live Sessions / 实时会话 — surface the new buyer-facing
+         product axis right after the hero. AI Interview is the only
+         template with a working voice loop today; the others are
+         design previews. The status pill on each card keeps the
+         claim honest so the page doesn't oversell. */}
+      <section id="sessions" className="border-y border-border-faint bg-surface-soft">
+        <div className="max-w-6xl mx-auto px-6 py-16">
+          <div className="text-center mb-10">
+            <span className="inline-flex items-center gap-2 bg-white border border-border text-ink-muted text-[11px] font-semibold uppercase tracking-widest px-3 py-1 rounded-full">
+              实时会话 · Live Sessions
+            </span>
+            <h2 className="mt-5 text-3xl sm:text-4xl font-bold tracking-tight">
+              AI 主持的实时会话，开口即出报告。
+            </h2>
+            <p className="mt-3 text-base text-ink-soft max-w-xl mx-auto leading-relaxed">
+              每个 session 都是 Agent Room 的预设场景：AI 角色、对话流程、可分享的结果产物 — 已经为一个具体场景调好。
+            </p>
+          </div>
+          <div className="grid sm:grid-cols-3 gap-4">
+            {LIVE_TEMPLATES.slice(0, 3).map((t: LiveTemplate) => {
+              const statusLabel = t.status === 'live-demo' ? 'Live demo'
+                : t.status === 'design-preview' ? 'Design preview'
+                : 'Coming soon';
+              const statusCls = t.status === 'live-demo' ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                : t.status === 'design-preview' ? 'bg-amber-50 text-amber-800 border-amber-200'
+                : 'bg-slate-100 text-slate-600 border-slate-200';
+              return (
+                <Link
+                  key={t.id}
+                  to={t.slug === 'interview' ? '/templates/interview' : `/templates/${t.slug}`}
+                  className="group bg-white border border-border rounded-2xl p-5 hover:border-accent/50 hover:shadow-card transition flex flex-col"
+                >
+                  <div className="flex items-center justify-between gap-2 mb-3">
+                    <span className="text-2xl leading-none">{t.emoji}</span>
+                    <span className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full border ${statusCls}`}>
+                      {statusLabel}
+                    </span>
+                  </div>
+                  <div className="text-base font-semibold tracking-tight group-hover:text-accent transition mb-1">{t.label}</div>
+                  <p className="text-sm text-ink-soft leading-snug flex-1">{t.tagline}</p>
+                  <div className="mt-4 text-xs font-semibold text-accent">View →</div>
+                </Link>
+              );
+            })}
+          </div>
+          <div className="text-center mt-8">
+            <Link to="/templates" className="inline-flex items-center text-sm font-semibold text-ink-muted hover:text-accent transition">
+              See all sessions →
+            </Link>
+          </div>
+        </div>
+      </section>
 
       {/* Works-with strip — show the full MCP compatibility story, but
          distinguish fully persistent clients from one-shot/manual clients. */}

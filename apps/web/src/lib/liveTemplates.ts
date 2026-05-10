@@ -129,7 +129,11 @@ const INTERVIEW: LiveTemplate = {
     { label: 'Risk flag', value: 'Caching strategy gap — probe in onsite system design' },
     { label: 'Evidence quotes', value: '3 quoted lines tied to rubric dimensions' },
   ],
-  status: 'design-preview',
+  // Bumped to live-demo: /templates/interview now runs a real Agent
+  // Room with ElevenLabs Scribe STT + Claude Haiku 4.5 interviewer +
+  // ElevenLabs TTS, end to end. Other templates stay design-preview
+  // until their voice loops land.
+  status: 'live-demo',
   pricing: [
     {
       tier: 'Free',
