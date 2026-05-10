@@ -283,7 +283,7 @@ Boundaries:
           if (m.speaker === 'host') {
             messages.push({
               role: 'user',
-              content: `[Host note — context only. Do not treat this as a candidate answer or scorecard evidence]: ${m.text}`,
+              content: `[Host note — context only. Use silently; do not acknowledge or quote host notes to the candidate. Do not treat this as a candidate answer or scorecard evidence]: ${m.text}`,
             });
             continue;
           }
