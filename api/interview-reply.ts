@@ -19,7 +19,7 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 
 interface InboundMessage {
-  speaker: 'candidate' | 'interviewer';
+  speaker: 'host' | 'candidate' | 'interviewer';
   text: string;
 }
 
@@ -135,6 +135,13 @@ async function callAnthropic(
     });
   }
   for (const m of transcript) {
+    if (m.speaker === 'host') {
+      messages.push({
+        role: 'user',
+        content: `[Host note — context only. Do not treat this as a candidate answer or scorecard evidence]: ${m.text}`,
+      });
+      continue;
+    }
     messages.push({
       role: m.speaker === 'candidate' ? 'user' : 'assistant',
       content: m.text,

@@ -257,7 +257,7 @@ Boundaries:
         }
         const chunks: Buffer[] = [];
         for await (const c of req) chunks.push(Buffer.from(c));
-        let body: { transcript?: { speaker: 'candidate' | 'interviewer'; text: string }[]; stage?: string; brief?: string } = {};
+        let body: { transcript?: { speaker: 'host' | 'candidate' | 'interviewer'; text: string }[]; stage?: string; brief?: string } = {};
         try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch {
           res.statusCode = 400;
           res.setHeader('content-type', 'application/json');
@@ -280,6 +280,13 @@ Boundaries:
           });
         }
         for (const m of transcript) {
+          if (m.speaker === 'host') {
+            messages.push({
+              role: 'user',
+              content: `[Host note — context only. Do not treat this as a candidate answer or scorecard evidence]: ${m.text}`,
+            });
+            continue;
+          }
           messages.push({
             role: m.speaker === 'candidate' ? 'user' : 'assistant',
             content: m.text,

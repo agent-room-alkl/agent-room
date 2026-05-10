@@ -40,6 +40,7 @@ import { VoiceButton } from '../components/VoiceButton.js';
 import { templateBySlug } from '../lib/liveTemplates.js';
 
 type Stage = 'opening' | 'depth' | 'tradeoffs' | 'behavioral' | 'wrap';
+type InterviewSpeaker = 'host' | 'candidate' | 'interviewer';
 
 const INTERVIEWER_NAME = 'AI Interviewer';
 const DEFAULT_CANDIDATE_NAME = 'Candidate';
@@ -81,11 +82,19 @@ const CLIENT_LADDER: Record<Stage, string[]> = {
 
 function clientLadderLine(
   stage: Stage,
-  transcript: { speaker: 'candidate' | 'interviewer'; text: string }[],
+  transcript: { speaker: InterviewSpeaker; text: string }[],
 ): string {
   const interviewerSoFar = transcript.filter(t => t.speaker === 'interviewer').length;
   const lines = CLIENT_LADDER[stage];
   return lines[Math.min(interviewerSoFar, lines.length - 1)] ?? lines[0]!;
+}
+
+function speakerForMessage(message: Message, candidateName: string): InterviewSpeaker {
+  if (message.name === INTERVIEWER_NAME && message.client === 'cc') return 'interviewer';
+  if (message.name === candidateName && message.role === 'Candidate') return 'candidate';
+  if (message.role === 'Host' || message.role === 'host') return 'host';
+  if (message.client === 'web') return 'host';
+  return 'candidate';
 }
 
 export function TemplateInterviewLive() {
@@ -233,7 +242,7 @@ export function TemplateInterviewLive() {
         const transcriptForLLM = messages
           .filter(m => m.type === 'msg')
           .map(m => ({
-            speaker: (m.name === INTERVIEWER_NAME ? 'interviewer' : 'candidate') as 'candidate' | 'interviewer',
+            speaker: speakerForMessage(m, candidateName),
             text: m.text,
           }));
         let resp: Response | null = null;
@@ -283,7 +292,7 @@ export function TemplateInterviewLive() {
         setBusyReply(false);
       }
     },
-    [code, messages, candidateTurns, brief],
+    [code, messages, candidateTurns, brief, candidateName],
   );
 
   // After room setup, fire the opening turn once.
@@ -590,33 +599,45 @@ export function TemplateInterviewLive() {
             {roomError && <p className="text-xs text-red-600 mb-2">{roomError}</p>}
             <ol className="flex-1 space-y-4 overflow-y-auto pr-1 max-h-[480px]">
               {messages.filter(m => m.type === 'msg').map(m => (
-                <li key={m.id} className="flex gap-3">
-                  <div
-                    className={
-                      'shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-[11px] font-bold ' +
-                      (m.client === 'cc'
-                        ? 'bg-indigo-100 text-indigo-700'
-                        : 'bg-emerald-100 text-emerald-700')
-                    }
-                  >
-                    {m.initials}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-0.5">
-                      <span className="text-xs font-semibold text-ink">{m.name}</span>
-                      {m.client === 'cc' && (
-                        <span className="text-[9px] font-semibold text-indigo-600 bg-indigo-50 border border-indigo-100 rounded px-1.5 py-0.5">
-                          AI
-                        </span>
-                      )}
-                      <span className="text-[10px] text-ink-faint">{new Date(m.time).toLocaleTimeString()}</span>
-                    </div>
-                    <p className="text-[13px] leading-relaxed text-ink-soft whitespace-pre-wrap">{m.text}</p>
-                    {m.client === 'cc' && (
-                      <AudioReplyBar text={m.text} active={speakingMessageId === m.id} />
-                    )}
-                  </div>
-                </li>
+                (() => {
+                  const speaker = speakerForMessage(m, candidateName);
+                  return (
+                    <li key={m.id} className="flex gap-3">
+                      <div
+                        className={
+                          'shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-[11px] font-bold ' +
+                          (speaker === 'interviewer'
+                            ? 'bg-indigo-100 text-indigo-700'
+                            : speaker === 'host'
+                            ? 'bg-amber-100 text-amber-700'
+                            : 'bg-emerald-100 text-emerald-700')
+                        }
+                      >
+                        {m.initials}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-0.5">
+                          <span className="text-xs font-semibold text-ink">{m.name}</span>
+                          {speaker === 'interviewer' && (
+                            <span className="text-[9px] font-semibold text-indigo-600 bg-indigo-50 border border-indigo-100 rounded px-1.5 py-0.5">
+                              AI
+                            </span>
+                          )}
+                          {speaker === 'host' && (
+                            <span className="text-[9px] font-semibold text-amber-700 bg-amber-50 border border-amber-100 rounded px-1.5 py-0.5">
+                              Host note
+                            </span>
+                          )}
+                          <span className="text-[10px] text-ink-faint">{new Date(m.time).toLocaleTimeString()}</span>
+                        </div>
+                        <p className="text-[13px] leading-relaxed text-ink-soft whitespace-pre-wrap">{m.text}</p>
+                        {speaker === 'interviewer' && (
+                          <AudioReplyBar text={m.text} active={speakingMessageId === m.id} />
+                        )}
+                      </div>
+                    </li>
+                  );
+                })()
               ))}
               {busyReply && (
                 <li className="text-[11px] text-ink-faint italic pl-11">AI Interviewer is thinking…</li>
