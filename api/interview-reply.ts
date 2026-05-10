@@ -17,6 +17,7 @@
 // hotfix #29 for the rationale), no DB writes, no external state.
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { checkUsageLimit } from './_usage.js';
 
 interface InboundMessage {
   speaker: 'host' | 'candidate' | 'interviewer';
@@ -201,6 +202,24 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   const transcript = Array.isArray(parsed.transcript) ? parsed.transcript : [];
   const stage = parsed.stage ?? (transcript.length === 0 ? 'opening' : 'depth');
   const brief = (typeof parsed.brief === 'string' ? parsed.brief.trim() : '').slice(0, 4000);
+  const usage = await checkUsageLimit({
+    req,
+    res,
+    service: 'interview-reply',
+    roomCode: parsed.code,
+    envLimitName: 'AI_INTERVIEW_REPLY_DAILY_LIMIT',
+    defaultLimit: 80,
+  });
+  if (!usage.allowed) {
+    res.setHeader('Cache-Control', 'no-store');
+    res.status(429).json({
+      error: 'usage_limit_exceeded',
+      message: 'This interview room has reached its daily AI reply limit. Please continue with the scripted fallback or try again tomorrow.',
+      limit: usage.limit,
+      resetSeconds: usage.resetSeconds,
+    });
+    return;
+  }
 
   // Try the LLM first.
   const apiKey = process.env.ANTHROPIC_API_KEY;

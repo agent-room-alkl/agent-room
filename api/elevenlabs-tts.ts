@@ -3,6 +3,7 @@
 // Vercel env vars and never ships to the client bundle.
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { checkUsageLimit } from './_usage.js';
 
 const DEFAULT_VOICE_ID = '21m00Tcm4TlvDq8ikWAM'; // Rachel — American, warm, expressive
 const DEFAULT_MODEL_ID = 'eleven_multilingual_v2';
@@ -20,10 +21,28 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     return;
   }
 
-  const body = (req.body ?? {}) as { text?: unknown };
+  const body = (req.body ?? {}) as { text?: unknown; code?: unknown };
   const text = typeof body.text === 'string' ? body.text.trim() : '';
   if (!text) {
     res.status(400).json({ error: 'missing_text', message: 'Text is required.' });
+    return;
+  }
+  const usage = await checkUsageLimit({
+    req,
+    res,
+    service: 'elevenlabs-tts',
+    roomCode: typeof body.code === 'string' ? body.code : undefined,
+    envLimitName: 'AI_INTERVIEW_TTS_DAILY_LIMIT',
+    defaultLimit: 160,
+  });
+  if (!usage.allowed) {
+    res.setHeader('Cache-Control', 'no-store');
+    res.status(429).json({
+      error: 'usage_limit_exceeded',
+      message: 'This room has reached its daily voice playback limit. Browser speech fallback can continue without ElevenLabs.',
+      limit: usage.limit,
+      resetSeconds: usage.resetSeconds,
+    });
     return;
   }
 

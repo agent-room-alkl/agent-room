@@ -362,7 +362,7 @@ export function TemplateInterviewLive() {
         const resp = await fetch('/api/elevenlabs-tts', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ text: messageToSpeak.text }),
+          body: JSON.stringify({ text: messageToSpeak.text, code }),
         });
         const ct = resp.headers.get('content-type') ?? '';
         if (!resp.ok || !ct.includes('audio/')) throw new Error('ElevenLabs unavailable');
