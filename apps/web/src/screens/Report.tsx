@@ -207,11 +207,11 @@ export function Report() {
 // passive demo into a one-click new-room flow with the source room's
 // topic pre-seeded so the reader doesn't have to guess what to type.
 //
-// The card sits between the body sections and the free-tier / unlocked
-// footer so it's the last positive thing the reader sees before any
-// pricing copy. Deep-link query params (`topic`, `from`) are consumed by
-// CreateMeeting.tsx — `from` is preserved purely for downstream
-// attribution / debugging, no behavior depends on it today.
+// The card sits between the body sections and the export footer so it's
+// the last positive thing the reader sees. Deep-link query params
+// (`topic`, `from`) are consumed by CreateMeeting.tsx — `from` is
+// preserved purely for downstream attribution / debugging, no behavior
+// depends on it today.
 function CreateYourOwnCTA({ report }: { report: RoomReport }) {
   const agentParticipants = report.participants.filter(
     p => p.client && p.client !== 'web'
@@ -254,29 +254,29 @@ function FreeTierFooter({ report }: { report: RoomReport }) {
   const expiresAt = report.exportedAt + 24 * 60 * 60 * 1000;
   const hoursLeft = Math.max(0, Math.round((expiresAt - Date.now()) / (60 * 60 * 1000)));
 
-  const pilotLink = `mailto:hello@agent-room.com?subject=${encodeURIComponent('Agent Room report unlock ' + report.code)}&body=${encodeURIComponent(`Hi, I'd like to unlock or pilot hosted reporting for ${report.code}.\n\nReport URL: https://www.agent-room.com/r/${report.code}/report\n\nMy client name / logo:\nHow often I expect to use Agent Room:`)}`;
-
   return (
-    <section className="bg-gradient-to-br from-accent-tint via-white to-amber-50 border border-accent-tint-border rounded-xl p-6 text-center">
-      <div className="text-[11px] uppercase tracking-widest font-semibold text-accent-deep mb-2">Free tier · expires in {hoursLeft}h</div>
+    <section className="bg-white border border-border rounded-xl p-6 text-center">
+      <div className="text-[11px] uppercase tracking-widest font-semibold text-ink-faint mb-2">Exported report · expires in {hoursLeft}h</div>
       <p className="text-base font-semibold text-ink mb-1">
         Made with <a href="https://www.agent-room.com" target="_blank" rel="noreferrer" className="text-accent underline underline-offset-2">Agent Room</a>
       </p>
       <p className="text-sm text-ink-soft max-w-md mx-auto mb-5 leading-relaxed">
-        Hosted share URLs stay short-lived and watermarked during beta. Self-host the open-source app for permanent URLs and your own branding — same code, your own infrastructure.
+        Self-host the open-source room protocol, or create a fresh room and keep working from the same flow.
       </p>
       <div className="flex flex-col sm:flex-row gap-2 justify-center">
-        <a
-          href={pilotLink}
+        <Link
+          to="/new"
           className="inline-flex items-center justify-center bg-accent text-white px-5 py-2.5 rounded-lg text-sm font-semibold hover:opacity-90 transition"
         >
-          Request hosted reporting
-        </a>
+          Create another room
+        </Link>
         <a
-          href="https://www.agent-room.com/#pricing"
+          href="https://github.com/ebin198351-akl/agent-room/blob/main/docs/AGENT_ROOM_PROTOCOL.md"
+          target="_blank"
+          rel="noreferrer"
           className="inline-flex items-center justify-center bg-white border border-border px-5 py-2.5 rounded-lg text-sm font-semibold text-ink-muted hover:bg-surface-soft transition"
         >
-          See plans
+          Protocol docs
         </a>
       </div>
     </section>
