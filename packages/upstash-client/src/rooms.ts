@@ -1,4 +1,9 @@
-import type { Room, Participant } from '@agent-room/shared';
+import type {
+  Room,
+  Participant,
+  ReplyMode,
+  ReplyModeConfig,
+} from '@agent-room/shared';
 import { AVATAR_PALETTE, ROOM_TTL_SECONDS } from '@agent-room/shared';
 import type { UpstashClient } from './client.js';
 import { RoomNotFoundError, ConcurrencyError } from './errors.js';
@@ -26,6 +31,9 @@ export interface CreateRoomInput {
   code: string;
   topic: string;
   createdBy: string;
+  ownerId?: string;
+  ownerEmail?: string;
+  ownerName?: string;
 }
 
 // createRoom now returns the Room PLUS a one-time `hostKey`. The host stores
@@ -44,10 +52,19 @@ export async function createRoom(client: UpstashClient, input: CreateRoomInput):
     topic: input.topic,
     createdAt: now,
     createdBy: input.createdBy,
+    ownerId: input.ownerId,
+    ownerEmail: input.ownerEmail,
+    ownerName: input.ownerName,
     status: 'active',
     version: 1,
     participants: [],
     hostKeyHash: await sha256Hex(hostKey),
+    // Default: open mode. Host can switch to 'sequential' / 'moderator' via
+    // setReplyMode(). Stored explicitly (rather than relying on the
+    // undefined-means-open fallback) so newly created rooms surface the
+    // field on the very first room_join response — clients can render the
+    // mode chip without waiting for a setReplyMode round-trip.
+    replyMode: 'open',
   };
   await client.command(['SET', roomKey(input.code), JSON.stringify(room), 'EX', ROOM_TTL_SECONDS]);
   return { ...room, hostKey };
@@ -314,6 +331,73 @@ export function findSpeaker(
   if (!p) return null;
   if (p.canSpeak === false) return null;
   return p;
+}
+
+// Set or clear reply-mode coordination on a room. Host-only. Switching
+// modes mid-conversation is supported; any in-flight turn state is cleared.
+//
+// Validates that the right fields are present for the requested mode:
+//   - 'open':       config can be empty / undefined
+//   - 'sequential': leadAgentName + leadAgentClient required IF caller wants
+//                   a non-default Lead; otherwise the room falls back to
+//                   "first cc-client agent in join order" at turn time.
+//                   Callers are encouraged to specify, but it's not enforced
+//                   here so UI can offer a "start sequential with first agent
+//                   as Lead" shortcut without forcing a selection.
+//   - 'moderator':  moderatorAgentName + moderatorAgentClient REQUIRED —
+//                   moderator mode is meaningless without a routing agent.
+export class InvalidModeConfigError extends Error {
+  constructor(mode: ReplyMode, missingField: string) {
+    super(`replyMode='${mode}' requires modeConfig.${missingField}.`);
+    this.name = 'InvalidModeConfigError';
+  }
+}
+
+export async function setReplyMode(
+  client: UpstashClient,
+  code: string,
+  requesterName: string,
+  mode: ReplyMode,
+  config: ReplyModeConfig | undefined,
+): Promise<Room> {
+  const updated = await casRoom(client, code, (current) => {
+    if (current.createdBy !== requesterName) {
+      throw new NotHostError(requesterName, current.createdBy);
+    }
+    if (mode === 'moderator') {
+      if (!config?.moderatorAgentName || !config?.moderatorAgentClient) {
+        throw new InvalidModeConfigError('moderator', 'moderatorAgentName + moderatorAgentClient');
+      }
+    }
+    // Persist normalized config. For 'open' we still keep whatever the
+    // caller passed (e.g. timeoutMs they pre-configured before switching
+    // away from sequential) so a later switch back doesn't lose settings.
+    return {
+      ...current,
+      replyMode: mode,
+      modeConfig: config,
+    };
+  });
+  // Any mode change aborts an in-flight turn. We do this as a best-effort
+  // sibling write (not atomic with the room CAS) — the only failure mode
+  // is "old turnState lingers", which the next human message will
+  // overwrite via newSequentialTurn / moderator startup anyway. Keeping
+  // it out of the CAS mutator avoids cyclic imports and keeps the room
+  // module unaware of turnState internals.
+  await client.command(['DEL', `turn-state:${code}`]);
+  return updated;
+}
+
+/**
+ * Thrown by `appendMessage` when the sender is not allowed to speak under
+ * the current reply-mode turn state. Slice A never throws this; Slice B
+ * begins throwing it in 'sequential' / 'moderator' rooms.
+ */
+export class NotYourTurnError extends Error {
+  constructor(name: string, mode: ReplyMode) {
+    super(`"${name}" is not allowed to speak right now (reply mode: ${mode}).`);
+    this.name = 'NotYourTurnError';
+  }
 }
 
 /**

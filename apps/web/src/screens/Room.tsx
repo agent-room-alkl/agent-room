@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect, useCallback, type ClipboardEvent } from 'react';
+import { useRef, useState, useEffect, useCallback, type ClipboardEvent, type DragEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useRoom } from '../hooks/useRoom.js';
 import { Bubble } from '../components/Bubble.js';
@@ -7,8 +7,8 @@ import { MeetingCodePill } from '../components/MeetingCodePill.js';
 import { Avatar } from '../components/Avatar.js';
 import { AgentRoomLogo } from '../components/AgentRoomLogo.js';
 import { colorForName, initialsFor } from '../lib/colors.js';
-import { PRESENCE_STALE_MS, PRESENCE_DISCONNECTED_MS, artifactLabel, extractArtifacts, type ArtifactKind, type Message, type MessageAttachment, type Participant, type RoomArtifact } from '@agent-room/shared';
-import { setMuted, createClient, createRoomReport, endRoom as endRoomApi, reactivateRoom as reactivateRoomApi, removeParticipant } from '@agent-room/upstash-client';
+import { PRESENCE_STALE_MS, PRESENCE_DISCONNECTED_MS, artifactLabel, extractArtifacts, type ArtifactKind, type Message, type MessageAttachment, type Participant, type ReplyMode, type ReplyModeConfig, type RoomArtifact, type SystemEventType } from '@agent-room/shared';
+import { appendSystemMessage, directInvoke, getTurnState, hostSkipCurrent, setMuted, setReplyMode, createClient, createRoomReport, endRoom as endRoomApi, reactivateRoom as reactivateRoomApi, removeParticipant, type TurnState } from '@agent-room/upstash-client';
 import { ENV } from '../env.js';
 import { copyText } from '../lib/copy.js';
 import { templateById } from '../lib/templates.js';
@@ -44,14 +44,18 @@ export function Room() {
   useEffect(() => {
     if (!self) navigate(`/j/${code}`, { replace: true });
   }, [self, code, navigate]);
-  const { room, messages, error, sendMessage, refreshRoom } = useRoom(code, self?.name ?? '');
+  const { room, messages, error, sendMessage, refreshRoom, forceRefresh } = useRoom(code, self?.name ?? '');
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<MessageAttachment[]>([]);
   const [attachBusy, setAttachBusy] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
+  const [modeBusy, setModeBusy] = useState(false);
+  const [turnState, setTurnState] = useState<TurnState | null>(null);
   const [now, setNow] = useState(Date.now());
   const feedRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const dragDepthRef = useRef(0);
 
   // Auto-grow the textarea: shrink to min, then expand to scrollHeight up to max.
   // Runs after every value change (typed, pasted, Draft injected, voice transcript).
@@ -87,6 +91,29 @@ export function Room() {
     if (room?.status === 'ended') setEnded(true);
     else if (room?.status === 'active') setEnded(false);
   }, [room?.status]);
+
+  useEffect(() => {
+    if (!room || (room.replyMode ?? 'open') === 'open') {
+      setTurnState(null);
+      return;
+    }
+    let cancelled = false;
+    async function pullTurnState() {
+      try {
+        const client = createClient(ENV.upstash);
+        const next = await getTurnState(client, code);
+        if (!cancelled) setTurnState(next);
+      } catch {
+        if (!cancelled) setTurnState(null);
+      }
+    }
+    void pullTurnState();
+    const id = window.setInterval(() => void pullTurnState(), 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [code, room?.replyMode, messages.length, room?.version]);
 
   // Template opener: if CreateMeeting stashed a template id for this room and
   // the host is opening an empty room, post the template's opening message
@@ -317,6 +344,171 @@ export function Room() {
   const myParticipant = room.participants.find(p => p.name === me.name && p.client === 'web');
   const myCanSpeak = isHost || myParticipant?.canSpeak !== false;
   const mutedCount = room.participants.filter(p => p.canSpeak === false).length;
+  const replyMode = activeRoom.replyMode ?? 'open';
+  const replyModeConfig = activeRoom.modeConfig;
+  const canConfigureReplyMode = isHost && !ended;
+  const roomAgents = activeRoom.participants.filter(p => p.client === 'cc');
+  const activeRoomAgents = roomAgents.filter(p => p.canSpeak !== false);
+  const fallbackAgent = activeRoomAgents[0] ?? roomAgents[0];
+  const selectedLeadAgentName = replyModeConfig?.leadAgentName ?? fallbackAgent?.name ?? '';
+  const selectedModeratorAgentName = replyModeConfig?.moderatorAgentName ?? fallbackAgent?.name ?? '';
+  const currentSpeaker = turnState?.currentName && turnState.currentClient
+    ? activeRoom.participants.find(p => p.name === turnState.currentName && p.client === turnState.currentClient)
+    : undefined;
+  const currentDeadlineMs = turnState?.deadline ? Math.max(0, turnState.deadline - now) : null;
+
+  function modeLabel(mode: ReplyMode): string {
+    if (mode === 'sequential') return 'Sequential';
+    if (mode === 'moderator') return 'Moderator';
+    return 'Open';
+  }
+
+  function buildModeConfig(mode: ReplyMode, overrides: Partial<ReplyModeConfig> = {}): ReplyModeConfig | undefined {
+    const timeoutMs = replyModeConfig?.timeoutMs;
+    if (mode === 'open') return timeoutMs ? { timeoutMs } : undefined;
+
+    const base: ReplyModeConfig = { ...(replyModeConfig ?? {}), ...overrides };
+    if (mode === 'sequential') {
+      const leadName = overrides.leadAgentName ?? base.leadAgentName ?? fallbackAgent?.name;
+      return {
+        ...base,
+        ...(timeoutMs ? { timeoutMs } : {}),
+        leadAgentName: leadName,
+        leadAgentClient: leadName ? 'cc' : undefined,
+      };
+    }
+
+    const moderatorName = overrides.moderatorAgentName ?? base.moderatorAgentName ?? fallbackAgent?.name;
+    return {
+      ...base,
+      ...(timeoutMs ? { timeoutMs } : {}),
+      moderatorAgentName: moderatorName,
+      moderatorAgentClient: moderatorName ? 'cc' : undefined,
+    };
+  }
+
+  async function updateReplyMode(mode: ReplyMode, overrides: Partial<ReplyModeConfig> = {}) {
+    if (!canConfigureReplyMode) return;
+    const nextConfig = buildModeConfig(mode, overrides);
+    if (mode !== 'open' && !fallbackAgent) {
+      const { showToast } = await import('../components/Toast.js');
+      showToast('Add an agent before enabling Sequential or Moderator mode.');
+      return;
+    }
+    setModeBusy(true);
+    try {
+      const client = createClient(ENV.upstash);
+      await setReplyMode(client, code, me.name, mode, nextConfig);
+      await refreshRoom();
+      const { showToast } = await import('../components/Toast.js');
+      showToast(`Reply mode set to ${modeLabel(mode)}.`);
+    } catch (e) {
+      const { showToast } = await import('../components/Toast.js');
+      showToast(e instanceof Error ? `Mode change failed: ${e.message}` : 'Mode change failed');
+    } finally {
+      setModeBusy(false);
+    }
+  }
+
+  async function refreshTurnAndMessages() {
+    try {
+      const client = createClient(ENV.upstash);
+      setTurnState(await getTurnState(client, code));
+    } catch {
+      setTurnState(null);
+    }
+    await forceRefresh();
+  }
+
+  async function emitTurnSystemMessage(
+    textValue: string,
+    eventType: SystemEventType,
+    target: { name: string; client: 'web' | 'cc' },
+    extra: Partial<NonNullable<Message['metadata']>> = {},
+  ) {
+    const client = createClient(ENV.upstash);
+    const nowMs = Date.now();
+    const msg: Message = {
+      id: nowMs,
+      type: 'sys',
+      name: 'system',
+      role: '',
+      initials: 'AR',
+      color: '#5B6AFF',
+      client: 'cc',
+      text: textValue,
+      time: nowMs,
+      metadata: {
+        eventType,
+        modeAtSend: replyMode,
+        targetAgentName: target.name,
+        targetAgentClient: target.client,
+        ...extra,
+      },
+    };
+    await appendSystemMessage(client, code, msg);
+  }
+
+  async function handleAskAgent(p: Participant) {
+    if (!canConfigureReplyMode || p.client !== 'cc') return;
+    if (replyMode === 'open') {
+      appendText(`@${p.name} `);
+      return;
+    }
+    if (!turnState) {
+      const { showToast } = await import('../components/Toast.js');
+      showToast('Send a message first, then ask an agent inside that turn.');
+      return;
+    }
+    setModeBusy(true);
+    try {
+      const client = createClient(ENV.upstash);
+      const added = await directInvoke(client, code, { name: p.name, client: p.client }, 'host');
+      if (!added) {
+        const { showToast } = await import('../components/Toast.js');
+        showToast(`${p.name} is already queued for a direct reply.`);
+        return;
+      }
+      await emitTurnSystemMessage(
+        `Host directly invoked @${p.name}.`,
+        'host_invoked',
+        { name: p.name, client: p.client },
+        { invocationType: 'host_directed' },
+      );
+      await refreshTurnAndMessages();
+    } catch (e) {
+      const { showToast } = await import('../components/Toast.js');
+      showToast(e instanceof Error ? `Ask failed: ${e.message}` : 'Ask failed');
+    } finally {
+      setModeBusy(false);
+    }
+  }
+
+  async function handleSkipCurrent() {
+    if (!canConfigureReplyMode || !currentSpeaker) return;
+    setModeBusy(true);
+    try {
+      const client = createClient(ENV.upstash);
+      const skipped = await hostSkipCurrent(client, code, activeRoom);
+      if (!skipped) {
+        const { showToast } = await import('../components/Toast.js');
+        showToast('No active agent to skip.');
+        return;
+      }
+      await emitTurnSystemMessage(
+        `Host skipped @${skipped.name}'s ${skipped.role} slot.`,
+        'skipped_by_host',
+        { name: skipped.name, client: skipped.client },
+        { roleAtSend: skipped.role, skippedBy: 'host' },
+      );
+      await refreshTurnAndMessages();
+    } catch (e) {
+      const { showToast } = await import('../components/Toast.js');
+      showToast(e instanceof Error ? `Skip failed: ${e.message}` : 'Skip failed');
+    } finally {
+      setModeBusy(false);
+    }
+  }
 
   function fillPrompt(kind: 'minutes' | 'reply') {
     const agent = activeRoom.participants.find(p => p.client !== 'web' && p.canSpeak !== false)?.name ?? 'Claude';
@@ -381,6 +573,83 @@ export function Room() {
       setAttachBusy(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
+  }
+
+  function appendText(value: string) {
+    setText(prev => {
+      if (!prev.trim()) return value;
+      return `${prev}\n${value}`;
+    });
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      autoGrow(textareaRef.current);
+    });
+  }
+
+  async function fileFromUrl(url: string): Promise<File | null> {
+    try {
+      const parsed = new URL(url);
+      const resp = await fetch(parsed.toString());
+      if (!resp.ok) return null;
+      const blob = await resp.blob();
+      if (!ALLOWED_ATTACHMENT_TYPES.has(blob.type)) return null;
+      const pathName = decodeURIComponent(parsed.pathname.split('/').filter(Boolean).pop() ?? 'attachment');
+      const fallbackName = blob.type.startsWith('image/') ? 'image' : 'attachment';
+      const name = pathName.includes('.') ? pathName : `${fallbackName}.${blob.type.split('/')[1] ?? 'bin'}`;
+      return new File([blob], name, { type: blob.type });
+    } catch {
+      return null;
+    }
+  }
+
+  async function filesFromDrop(dataTransfer: DataTransfer, uri: string): Promise<File[]> {
+    const droppedFiles = Array.from(dataTransfer.files);
+    if (droppedFiles.length > 0) return droppedFiles;
+    if (!uri) return [];
+    const file = await fileFromUrl(uri);
+    return file ? [file] : [];
+  }
+
+  function handleDragEnter(e: DragEvent<HTMLElement>) {
+    if (ended) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragDepthRef.current += 1;
+    setDragActive(true);
+  }
+
+  function handleDragOver(e: DragEvent<HTMLElement>) {
+    if (ended) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'copy';
+  }
+
+  function handleDragLeave(e: DragEvent<HTMLElement>) {
+    if (ended) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) setDragActive(false);
+  }
+
+  async function handleDrop(e: DragEvent<HTMLElement>) {
+    if (ended) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragDepthRef.current = 0;
+    setDragActive(false);
+
+    const uri = e.dataTransfer.getData('text/uri-list').split('\n').find(line => line && !line.startsWith('#')) ?? '';
+    const plainText = e.dataTransfer.getData('text/plain');
+    const files = await filesFromDrop(e.dataTransfer, uri);
+    if (files.length > 0) {
+      await addFiles(files);
+      return;
+    }
+
+    const textValue = plainText || uri;
+    if (textValue.trim()) appendText(textValue.trim());
   }
 
   async function handlePaste(e: ClipboardEvent<HTMLTextAreaElement>) {
@@ -451,6 +720,86 @@ export function Room() {
               >
                 Copy invite link
               </button>
+              <div className="mt-3 rounded-lg border border-border-faint bg-surface-softer p-2.5">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-semibold uppercase text-ink-faint">Reply mode</span>
+                  <span className="rounded bg-white px-1.5 py-0.5 text-[9px] font-semibold text-ink-soft">
+                    {modeLabel(replyMode)}
+                  </span>
+                </div>
+                {canConfigureReplyMode ? (
+                  <div className="space-y-2">
+                    <select
+                      value={replyMode}
+                      onChange={e => { void updateReplyMode(e.target.value as ReplyMode); }}
+                      disabled={modeBusy}
+                      className="h-9 w-full rounded-md border border-border bg-white px-2 text-xs font-semibold text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent-tint disabled:opacity-60"
+                    >
+                      <option value="open">Open</option>
+                      <option value="sequential">Sequential</option>
+                      <option value="moderator">Moderator</option>
+                    </select>
+                    {replyMode === 'sequential' && (
+                      <select
+                        value={selectedLeadAgentName}
+                        onChange={e => { void updateReplyMode('sequential', { leadAgentName: e.target.value, leadAgentClient: 'cc' }); }}
+                        disabled={modeBusy || activeRoomAgents.length === 0}
+                        className="h-9 w-full rounded-md border border-border bg-white px-2 text-xs font-semibold text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent-tint disabled:opacity-60"
+                        aria-label="Lead agent"
+                      >
+                        {activeRoomAgents.length === 0 ? (
+                          <option value="">No agents</option>
+                        ) : activeRoomAgents.map(agent => (
+                          <option key={`${agent.name}-${agent.client}`} value={agent.name}>Lead: {agent.name}</option>
+                        ))}
+                      </select>
+                    )}
+                    {replyMode === 'moderator' && (
+                      <select
+                        value={selectedModeratorAgentName}
+                        onChange={e => { void updateReplyMode('moderator', { moderatorAgentName: e.target.value, moderatorAgentClient: 'cc' }); }}
+                        disabled={modeBusy || activeRoomAgents.length === 0}
+                        className="h-9 w-full rounded-md border border-border bg-white px-2 text-xs font-semibold text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent-tint disabled:opacity-60"
+                        aria-label="Moderator agent"
+                      >
+                        {activeRoomAgents.length === 0 ? (
+                          <option value="">No agents</option>
+                        ) : activeRoomAgents.map(agent => (
+                          <option key={`${agent.name}-${agent.client}`} value={agent.name}>Moderator: {agent.name}</option>
+                        ))}
+                      </select>
+                    )}
+                    {replyMode !== 'open' && (
+                      <div className="rounded-md border border-border-faint bg-white px-2 py-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="truncate text-[11px] font-semibold text-ink">
+                              {currentSpeaker ? `Now: ${currentSpeaker.name}` : 'No active turn'}
+                            </div>
+                            <div className="text-[9px] text-ink-soft">
+                              {currentSpeaker && currentDeadlineMs !== null
+                                ? `${Math.ceil(currentDeadlineMs / 1000)}s left`
+                                : 'Waiting'}
+                            </div>
+                          </div>
+                          {currentSpeaker && (
+                            <button
+                              type="button"
+                              onClick={() => { void handleSkipCurrent(); }}
+                              disabled={modeBusy}
+                              className="h-7 rounded-md border border-amber-200 bg-amber-50 px-2 text-[10px] font-semibold text-amber-700 transition hover:bg-amber-100 disabled:opacity-60"
+                            >
+                              Skip
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="text-xs font-semibold text-ink-muted">{modeLabel(replyMode)}</div>
+                )}
+              </div>
             </div>
 
             <div className="flex-1 overflow-y-auto p-4">
@@ -465,6 +814,7 @@ export function Room() {
                   const canKick = isMeHost && !isSelf && !ended;
                   const isMuted = p.canSpeak === false;
                   const canMuteToggle = isMeHost && !isSelf && !ended;
+                  const canAsk = canConfigureReplyMode && p.client === 'cc' && !isMuted;
                   const presence = participantPresence(p, now);
                   // Whole-row visual fade for participants who haven't been
                   // seen in a while — keeps the row legible but signals
@@ -504,8 +854,19 @@ export function Room() {
                         but always discoverable, and only render at all when
                         the viewer is actually the host.
                       */}
-                      {(canMuteToggle || canKick) && (
+                      {(canAsk || canMuteToggle || canKick) && (
                         <div className="flex items-center gap-1">
+                          {canAsk && (
+                            <button
+                              onClick={() => { void handleAskAgent(p); }}
+                              title={`Ask ${p.name}`}
+                              aria-label={`Ask ${p.name}`}
+                              disabled={modeBusy}
+                              className="flex h-7 min-w-7 items-center justify-center rounded-md border border-accent-tint-border bg-accent-tint px-1.5 text-[10px] font-semibold text-accent transition hover:bg-accent-tint-border disabled:opacity-60"
+                            >
+                              Ask
+                            </button>
+                          )}
                           {canMuteToggle && (
                             <button
                               onClick={() => handleToggleMute({ name: p.name, client: p.client, canSpeak: p.canSpeak })}
@@ -666,7 +1027,18 @@ export function Room() {
                 </p>
               </div>
             ) : (
-              <div className="relative border-t border-border-faint p-3 bg-surface flex flex-col gap-2">
+              <div
+                className={`relative border-t border-border-faint p-3 bg-surface flex flex-col gap-2 transition ${dragActive ? 'ring-2 ring-inset ring-accent bg-accent-tint/40' : ''}`}
+                onDragEnter={handleDragEnter}
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={e => { void handleDrop(e); }}
+              >
+                {dragActive && (
+                  <div className="pointer-events-none absolute inset-2 z-10 flex items-center justify-center rounded-lg border-2 border-dashed border-accent bg-surface/90 text-sm font-semibold text-accent shadow-sm">
+                    Release to attach
+                  </div>
+                )}
                 {isHost && mutedCount > 0 && (
                   <div className="text-[11px] font-semibold text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2 py-1.5 flex items-center gap-2">
                     <span>🔇</span>

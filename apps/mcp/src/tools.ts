@@ -8,19 +8,45 @@ import {
   verifyHostKey,
   HostNameTakenError,
   MutedError,
+  NotYourTurnError,
+  NotHostError,
+  InvalidModeConfigError,
+  setReplyMode,
   endRoom,
   reactivateRoom,
   appendMessage,
+  appendSystemMessage,
   listMessages,
   createRoomReport,
   setListenUntil,
   removeParticipant,
+  getTurnState,
+  sweepTimeouts,
+  myRoleInTurn,
+  directInvoke,
+  hostSkipCurrent,
+  type TurnSpokenEntry,
+  type FallbackReason,
   type UpstashEnv,
 } from '@agent-room/upstash-client';
 import { generateCode, AVATAR_PALETTE, roleBriefFor, normalizeEscapedWhitespace } from '@agent-room/shared';
-import type { Message, Participant, MessageAttachment } from '@agent-room/shared';
-import { setRoom, removeRoom, updateCursor, markSent, readState } from './state.js';
-import { detectHarness, persistenceSetupHint } from './harness.js';
+import type {
+  Message,
+  Participant,
+  MessageAttachment,
+  ReplyMode,
+  ReplyModeConfig,
+  ClientKind,
+  Room,
+} from '@agent-room/shared';
+import { setRoom, removeRoom, updateCursor, markSent, readState, readRoomStateForJoin } from './state.js';
+import {
+  detectHarness,
+  defaultListenAfterJoin,
+  geminiMcpTimeoutHint,
+  GEMINI_CLI_MAX_LISTEN_MS,
+  persistenceSetupHint,
+} from './harness.js';
 import {
   uploadAgentAttachments,
   AttachmentUploadError,
@@ -60,6 +86,163 @@ const ACTIVE_ROOM_CONTRACT =
 
 function nextListenContract(code: string, since: number): string {
   return `${ACTIVE_ROOM_CONTRACT} NEXT TOOL CALL: room_listen({ code: "${code}", since: ${since} }). Ending your turn without that pending room_listen drops you from the conversation.`;
+}
+
+// Snapshot of the room's reply-mode state that callers can include in any
+// MCP response. Read once, return once. Self-knowledge fields
+// (`myRoleInTurn`, `canISpeakNow`) are populated when the caller passes
+// the agent's own identity; otherwise just the public bits come back.
+//
+// Cost: one getTurnState read per response. We skip it entirely for 'open'
+// rooms (TurnState is never written there), so the legacy hot path
+// continues to be a single getRoom call.
+interface ReplyModeSnapshot {
+  replyMode: ReplyMode;
+  modeConfig?: ReplyModeConfig;
+  currentSpeaker?: {
+    name: string;
+    client: ClientKind;
+    role: string;
+    deadline?: number;
+  };
+  turnId?: number;
+  myRoleInTurn?: ReturnType<typeof myRoleInTurn>;
+  // True iff the named caller is currently allowed to call room_send
+  // (current speaker, or on the host-directed allowlist, or human).
+  canISpeakNow?: boolean;
+}
+
+async function readReplyModeSnapshot(
+  client: ReturnType<typeof createClient>,
+  room: Room,
+  selfName?: string,
+  selfClient: ClientKind = 'cc',
+): Promise<ReplyModeSnapshot> {
+  const replyMode: ReplyMode = (room.replyMode ?? 'open') as ReplyMode;
+  const snapshot: ReplyModeSnapshot = { replyMode };
+  if (room.modeConfig) snapshot.modeConfig = room.modeConfig;
+  if (replyMode === 'open') {
+    if (selfName) {
+      // In open mode everyone allowed (subject to mute, which the caller
+      // already validated). 'observer' is a slight misnomer here but it
+      // keeps the field shape consistent — open mode has no turn role.
+      snapshot.myRoleInTurn = 'observer';
+      snapshot.canISpeakNow = true;
+    }
+    return snapshot;
+  }
+  // Non-open mode: read turn state. May be null if no turn is active.
+  let state: Awaited<ReturnType<typeof getTurnState>>;
+  try {
+    state = await getTurnState(client, room.code);
+  } catch {
+    state = null;
+  }
+  if (state?.currentName && state.currentClient && state.currentRole) {
+    snapshot.currentSpeaker = {
+      name: state.currentName,
+      client: state.currentClient,
+      role: state.currentRole,
+      ...(state.deadline !== undefined ? { deadline: state.deadline } : {}),
+    };
+  }
+  if (state?.turnId !== undefined) snapshot.turnId = state.turnId;
+  if (selfName) {
+    const role = myRoleInTurn(state, selfName, selfClient);
+    snapshot.myRoleInTurn = role;
+    // Humans can always speak. Among cc, only the current speaker and
+    // anyone on the host-directed allowlist may send.
+    if (selfClient === 'web' || selfName === room.createdBy) {
+      snapshot.canISpeakNow = true;
+    } else {
+      snapshot.canISpeakNow =
+        role === 'lead' || role === 'supplement' || role === 'moderator' ||
+        role === 'assignee' || role === 'host_directed';
+    }
+  }
+  return snapshot;
+}
+
+// Server-emitted sys message for a turn-timeout skip. Posted by the lazy
+// timeout sweep when an agent's deadline expires without a reply. The
+// `@AgentName` prefix is intentional — agents that scan messages for
+// mentions will notice they were skipped.
+async function emitTimeoutSysMessage(
+  client: ReturnType<typeof createClient>,
+  code: string,
+  skip: TurnSpokenEntry,
+  mode: ReplyMode,
+): Promise<void> {
+  const now = Date.now();
+  const sysMsg: Message = {
+    id: now,
+    type: 'sys',
+    name: 'system',
+    initials: '⏱️',
+    color: '#EF4444',
+    role: '',
+    text: `@${skip.name} did not reply in time — skipping their ${skip.role} slot.`,
+    client: 'cc',
+    time: now,
+    metadata: {
+      eventType: 'timed_out',
+      modeAtSend: mode,
+      roleAtSend: skip.role,
+      targetAgentName: skip.name,
+      targetAgentClient: skip.client,
+      skippedBy: 'system',
+    },
+  };
+  try {
+    await appendSystemMessage(client, code, sysMsg);
+  } catch { /* best-effort — the turn already advanced even if sys msg fails */ }
+}
+
+// Server-emitted sys message for a mode auto-fallback. Posted when the
+// Moderator times out, the Moderator leaves the room, or the Sequential
+// Lead leaves the room. The room's replyMode has already been flipped to
+// 'open' by sweepTimeouts; this message tells participants why.
+async function emitFallbackSysMessage(
+  client: ReturnType<typeof createClient>,
+  code: string,
+  fallback: { reason: FallbackReason; agentName: string; agentClient: ClientKind },
+  priorMode: ReplyMode,
+): Promise<void> {
+  const now = Date.now();
+  let text: string;
+  let eventType: 'moderator_fallback' | 'lead_left' | 'moderator_left';
+  switch (fallback.reason) {
+    case 'moderator_timeout':
+      text = `Moderator @${fallback.agentName} did not respond in time — falling back to open mode.`;
+      eventType = 'moderator_fallback';
+      break;
+    case 'moderator_left':
+      text = `Moderator @${fallback.agentName} left the room — falling back to open mode.`;
+      eventType = 'moderator_left';
+      break;
+    case 'lead_left':
+      text = `Lead @${fallback.agentName} left the room — falling back to open mode.`;
+      eventType = 'lead_left';
+      break;
+  }
+  const sysMsg: Message = {
+    id: now,
+    type: 'sys',
+    name: 'system',
+    initials: '🔓',
+    color: '#10B981',
+    role: '',
+    text,
+    client: 'cc',
+    time: now,
+    metadata: {
+      eventType,
+      modeAtSend: priorMode,
+      targetAgentName: fallback.agentName,
+      targetAgentClient: fallback.agentClient,
+    },
+  };
+  try { await appendSystemMessage(client, code, sysMsg); } catch { /* best-effort */ }
 }
 
 type RoomListenPollResult = {
@@ -125,6 +308,27 @@ async function runRoomListenPoll(
             hint: `TERMINATION SIGNAL: you were removed from the participants list (likely by the host "${room.createdBy}"). Stop calling room_listen — you are no longer in this meeting. Inform the user.`,
           };
         }
+        // Reply-mode timeout sweep. Only meaningful when the room is in a
+        // turn-taking mode AND a turn is in flight; otherwise sweepTimeouts
+        // is a single Redis read that returns no-skips. We run this on the
+        // same 20s cadence as the room-status probe to keep added Redis
+        // load minimal. If a speaker timed out, we emit one sys message
+        // per skip and the next iteration's listMessages will pick them
+        // up and return them to the caller. If the sweep also triggered a
+        // mode auto-fallback (moderator timed out / Lead left / Moderator
+        // left), we emit a distinct sys event so participants know
+        // replyMode reverted to 'open'.
+        if (room.replyMode && room.replyMode !== 'open') {
+          try {
+            const sweep = await sweepTimeouts(client, room.code, room);
+            for (const skip of sweep.skipped) {
+              await emitTimeoutSysMessage(client, room.code, skip, room.replyMode);
+            }
+            if (sweep.fallback) {
+              await emitFallbackSysMessage(client, room.code, sweep.fallback, room.replyMode);
+            }
+          } catch { /* sweep is best-effort; never break the listen loop */ }
+        }
       } catch { /* transient — keep listening */ }
     }
     pollCount++;
@@ -143,11 +347,17 @@ async function runRoomListenPoll(
   };
 }
 
-function resolvedListenTimeoutMs(raw: unknown): number {
+function resolvedListenTimeoutMs(raw: unknown, harnessKind: ReturnType<typeof detectHarness>['kind']): number {
+  const cap =
+    harnessKind === 'gemini-cli'
+      ? Math.min(MAX_LISTEN_MS, GEMINI_CLI_MAX_LISTEN_MS)
+      : MAX_LISTEN_MS;
   if (typeof raw === 'number' && Number.isFinite(raw)) {
-    return Math.min(Math.max(1000, raw), MAX_LISTEN_MS);
+    return Math.min(Math.max(1000, raw), cap);
   }
-  return DEFAULT_LISTEN_MS;
+  return harnessKind === 'gemini-cli'
+    ? Math.min(DEFAULT_LISTEN_MS, GEMINI_CLI_MAX_LISTEN_MS)
+    : DEFAULT_LISTEN_MS;
 }
 
 export function registerTools(server: Server, env: UpstashEnv) {
@@ -159,7 +369,7 @@ export function registerTools(server: Server, env: UpstashEnv) {
   // `npx agent-room-mcp init`. Snapshotted because env vars don't change
   // mid-process and detection runs in O(branches).
   const harness = detectHarness();
-  const persistenceNudge = persistenceSetupHint(harness);
+  const persistenceNudge = persistenceSetupHint(harness) + geminiMcpTimeoutHint(harness);
 
   function startRoomWatcher(code: string, selfName: string, startCursor: number): void {
     if (watchers.has(code)) {
@@ -404,6 +614,86 @@ export function registerTools(server: Server, env: UpstashEnv) {
           properties: { code: { type: 'string' } },
         },
       },
+      {
+        name: 'room_set_mode',
+        description:
+          'Host-only. Set this room\'s agent reply mode. Modes:\n' +
+          ' - "open" (default): every approved participant may speak any time. Current legacy behavior.\n' +
+          ' - "sequential": a Lead agent answers first; the rest of the cc-client agents supplement in join order. Only the current turn-holder may call room_send; human participants and the host are always allowed.\n' +
+          ' - "moderator": a Moderator agent routes work to specific agents. Non-moderator agents stay silent unless assigned (or unless the host direct-invokes them).\n' +
+          'Switching modes mid-conversation is allowed; any in-flight turn is reset.\n' +
+          'Required modeConfig fields by mode:\n' +
+          ' - open: none required\n' +
+          ' - sequential: optional leadAgentName + leadAgentClient (omit to fall back to "first cc-client agent in join order")\n' +
+          ' - moderator: moderatorAgentName + moderatorAgentClient REQUIRED\n' +
+          'Returns the updated room with replyMode + modeConfig. Posts a "mode_changed" system message in the chat so all participants see the switch.',
+        inputSchema: {
+          type: 'object',
+          required: ['code', 'name', 'mode'],
+          properties: {
+            code: { type: 'string', description: 'Room code' },
+            name: { type: 'string', description: 'Caller display name. Must equal room.createdBy (host) — non-host requests are rejected.' },
+            mode: {
+              type: 'string',
+              enum: ['open', 'sequential', 'moderator'],
+              description: 'Target reply mode.',
+            },
+            modeConfig: {
+              type: 'object',
+              description: 'Mode-specific configuration. See tool description for required fields per mode.',
+              properties: {
+                leadAgentName: { type: 'string', description: 'Sequential mode: name of the Lead agent (the one who answers first).' },
+                leadAgentClient: { type: 'string', enum: ['web', 'cc'], description: 'Sequential mode: client of the Lead agent (usually "cc").' },
+                moderatorAgentName: { type: 'string', description: 'Moderator mode: name of the Moderator agent. Required.' },
+                moderatorAgentClient: { type: 'string', enum: ['web', 'cc'], description: 'Moderator mode: client of the Moderator agent (usually "cc"). Required.' },
+                timeoutMs: {
+                  type: 'object',
+                  description: 'Optional per-role timeout overrides in ms. Missing roles fall back to defaults (lead/assignee: 90s, supplement/moderator: 45s).',
+                  properties: {
+                    lead: { type: 'number' },
+                    supplement: { type: 'number' },
+                    moderator: { type: 'number' },
+                    assignee: { type: 'number' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      {
+        name: 'room_direct_invoke',
+        description:
+          'Grant a one-shot speaking slot to a specific agent, bypassing the normal turn order. The target may send one room_send and then they are removed from the allowlist again.\n' +
+          'Permissions:\n' +
+          ' - host: always allowed. Recipient\'s message is tagged roleAtSend="host_directed".\n' +
+          ' - moderator: allowed ONLY when the room is in "moderator" mode AND the caller IS the configured Moderator. Recipient\'s message is tagged roleAtSend="assignee" so reports distinguish moderator-routed work from host overrides.\n' +
+          'No-ops if no turn is in flight (the next human message will start one); call again after the first turn-starting message.\n' +
+          'Idempotent — re-invoking the same target before they reply does NOT stack (still one slot).',
+        inputSchema: {
+          type: 'object',
+          required: ['code', 'name', 'targetName'],
+          properties: {
+            code: { type: 'string', description: 'Room code' },
+            name: { type: 'string', description: 'Caller display name. Must be host OR (in moderator mode) the configured Moderator.' },
+            targetName: { type: 'string', description: 'Display name of the agent to grant the one-shot slot to.' },
+            targetClient: { type: 'string', enum: ['web', 'cc'], description: 'Client kind of the target. Defaults to "cc".' },
+          },
+        },
+      },
+      {
+        name: 'room_skip_current',
+        description:
+          'Host-only. Force-skip the current turn speaker (sequential or moderator mode). Advances the turn as if the speaker had timed out, but the spoken-log entry is marked status="skipped" and the sys event identifies the host as the trigger. No-ops if no turn is in flight.',
+        inputSchema: {
+          type: 'object',
+          required: ['code', 'name'],
+          properties: {
+            code: { type: 'string', description: 'Room code' },
+            name: { type: 'string', description: 'Caller display name. Must equal room.createdBy.' },
+          },
+        },
+      },
     ],
   }));
 
@@ -432,8 +722,8 @@ export function registerTools(server: Server, env: UpstashEnv) {
       // parallel sessions don't share keys.
       await setRoom(code, { name: a.name, cursor: msgs.length, joinedAt: Date.now(), hostKey: created.hostKey });
 
-      const listenAfterJoin = a.listenAfterJoin !== false;
-      const listenMs = resolvedListenTimeoutMs(a.listenTimeoutMs);
+      const listenAfterJoin = defaultListenAfterJoin(harness, a.listenAfterJoin);
+      const listenMs = resolvedListenTimeoutMs(a.listenTimeoutMs, harness.kind);
       if (listenAfterJoin) {
         const first = await runRoomListenPoll(client, code, msgs.length, listenMs, a.name);
         await updateCursor(code, first.cursor);
@@ -488,8 +778,7 @@ export function registerTools(server: Server, env: UpstashEnv) {
       const targetRoom = await getRoom(client, a.code);
       let storedStateRoom: Awaited<ReturnType<typeof readState>>['rooms'][string] | undefined;
       try {
-        const state = await readState();
-        storedStateRoom = state.rooms[a.code];
+        storedStateRoom = await readRoomStateForJoin(a.code, a.name);
       } catch { /* local state is optional; treat as fresh join */ }
       if (a.name === targetRoom.createdBy) {
         try {
@@ -546,8 +835,14 @@ export function registerTools(server: Server, env: UpstashEnv) {
         time: m.time,
       }));
 
-      const listenAfterJoin = a.listenAfterJoin !== false;
-      const listenMs = resolvedListenTimeoutMs(a.listenTimeoutMs);
+      const listenAfterJoin = defaultListenAfterJoin(harness, a.listenAfterJoin);
+      const listenMs = resolvedListenTimeoutMs(a.listenTimeoutMs, harness.kind);
+
+      // One-shot reply-mode snapshot for the join response. Uses the
+      // post-join Room (which already has the new participant's row, so
+      // a Lead-fallback that selects "first cc agent" includes a joining
+      // agent if applicable).
+      const joinSnapshot = await readReplyModeSnapshot(client, updated, finalName);
 
       if (listenAfterJoin) {
         const first = await runRoomListenPoll(client, a.code, msgs.length, listenMs, finalName);
@@ -564,6 +859,11 @@ export function registerTools(server: Server, env: UpstashEnv) {
           assignedName: finalName,
           renamed: finalName !== a.name,
           canSpeak: !muted,
+          // Reply-mode snapshot: replyMode (always), modeConfig (when
+          // non-open), and per-self fields myRoleInTurn / canISpeakNow.
+          // Agents should consult these before calling room_send in
+          // sequential / moderator modes.
+          ...joinSnapshot,
           participants: updated.participants.map((p: Participant) => ({
             name: p.name,
             role: p.role,
@@ -592,6 +892,7 @@ export function registerTools(server: Server, env: UpstashEnv) {
         assignedName: finalName,
         renamed: finalName !== a.name,
         canSpeak: !muted,
+        ...joinSnapshot,
         participants: updated.participants.map((p: Participant) => ({
           name: p.name,
           role: p.role,
@@ -670,8 +971,9 @@ export function registerTools(server: Server, env: UpstashEnv) {
         time: Date.now(),
         ...(attachments.length > 0 ? { attachments } : {}),
       };
+      let appendResult: Awaited<ReturnType<typeof appendMessage>>;
       try {
-        await appendMessage(client, a.code, msg);
+        appendResult = await appendMessage(client, a.code, msg);
       } catch (e) {
         if (e instanceof MutedError) {
           // The host has muted this participant. Tell the user explicitly
@@ -682,6 +984,17 @@ export function registerTools(server: Server, env: UpstashEnv) {
             hint: `${e.message} Tell the user the host needs to unmute (🔊) in the People panel. Then call room_listen and wait — do NOT retry room_send until you see canSpeak=true on yourself in a room_listen response.`,
           });
         }
+        if (e instanceof NotYourTurnError) {
+          // Room is in 'sequential' / 'moderator' reply-mode and this agent
+          // is not the current turn-holder. Wait — the next room_listen
+          // result will surface the current speaker / your role so you can
+          // tell when it IS your turn. Retrying immediately will fail again.
+          return ok({
+            sent: false,
+            error: 'not_your_turn',
+            hint: `${e.message} Call room_listen and wait for your turn — the listen response will include the current speaker. Do NOT retry room_send until you see myRoleInTurn set and you're the current turn-holder.`,
+          });
+        }
         throw e;
       }
       const msgs = await listMessages(client, a.code, 0);
@@ -689,9 +1002,26 @@ export function registerTools(server: Server, env: UpstashEnv) {
       await updateCursor(a.code, msgs.length);
       // Record send-time so the Stop hook will hold briefly waiting for a reply.
       await markSent(a.code, Date.now());
+      // Supplement-skip token (`__no_addition__`) is consumed by the turn
+      // machinery — the message is NOT in the chat, but the turn did
+      // advance. Surface this distinctly so the agent harness knows its
+      // skip was honored and it should now wait for the next turn.
+      if (!appendResult.appended && appendResult.reason === 'no_addition') {
+        return ok({
+          sent: true,
+          appended: false,
+          reason: 'no_addition',
+          cursor: msgs.length,
+          metadata: appendResult.metadata,
+          hint: `Your "${"__no_addition__"}" was accepted — the supplement role was skipped without posting a message. ${nextListenContract(a.code, msgs.length)}`,
+        });
+      }
       return ok({
         sent: true,
+        appended: true,
         cursor: msgs.length,
+        ...(appendResult.metadata?.roleAtSend ? { roleAtSend: appendResult.metadata.roleAtSend } : {}),
+        ...(appendResult.metadata?.turnId !== undefined ? { turnId: appendResult.metadata.turnId } : {}),
         hint: `Sent. ${nextListenContract(a.code, msgs.length)}`,
       });
     }
@@ -734,12 +1064,24 @@ export function registerTools(server: Server, env: UpstashEnv) {
           selfName = state.rooms[a.code]?.name;
         } catch { /* state unavailable */ }
       }
-      const timeoutMs = resolvedListenTimeoutMs(a.timeoutMs);
+      const timeoutMs = resolvedListenTimeoutMs(a.timeoutMs, harness.kind);
       const result = await runRoomListenPoll(client, a.code, since, timeoutMs, selfName);
+      // Reply-mode snapshot: one extra getRoom + (non-open only) one
+      // getTurnState. Adds ~2 Redis reads per listen *return* (not per
+      // poll iteration) — listen-returns happen on the order of every
+      // few minutes, so this is negligible.
+      let snapshot: ReplyModeSnapshot | undefined;
+      if (!result.terminated) {
+        try {
+          const room = await getRoom(client, a.code);
+          snapshot = await readReplyModeSnapshot(client, room, selfName);
+        } catch { /* snapshot is best-effort */ }
+      }
       return ok({
         messages: result.messages,
         cursor: result.cursor,
         ...(result.terminated ? { terminated: result.terminated } : {}),
+        ...(snapshot ?? {}),
         hint: result.hint,
       });
     }
@@ -819,6 +1161,174 @@ export function registerTools(server: Server, env: UpstashEnv) {
         topic: room.topic,
         participants: room.participants.map((p: Participant) => p.name),
         transcript: all.map((m: Message) => `${m.name}: ${m.text}`).join('\n'),
+      });
+    }
+
+    if (name === 'room_set_mode') {
+      const mode = a.mode as ReplyMode;
+      const config = (a.modeConfig ?? undefined) as ReplyModeConfig | undefined;
+      let updated: Awaited<ReturnType<typeof setReplyMode>>;
+      try {
+        updated = await setReplyMode(client, a.code, a.name, mode, config);
+      } catch (e) {
+        if (e instanceof NotHostError) {
+          return ok({
+            ok: false,
+            error: 'not_host',
+            hint: `${e.message} Only the room creator can change reply mode. Ask the host to flip it.`,
+          });
+        }
+        if (e instanceof InvalidModeConfigError) {
+          return ok({
+            ok: false,
+            error: 'invalid_mode_config',
+            hint: `${e.message} Re-call room_set_mode with the required modeConfig fields.`,
+          });
+        }
+        throw e;
+      }
+      // System message so every participant sees the switch in the chat
+      // stream. Tagged with eventType='mode_changed' so the UI can render
+      // it as a distinct mode-change chip rather than a normal sys line.
+      const sysMsg: Message = {
+        id: Date.now(),
+        type: 'sys',
+        name: 'system',
+        initials: '⚙️',
+        color: '#6B7280',
+        role: '',
+        text: `Reply mode changed to "${mode}" by ${a.name}.`,
+        client: 'cc',
+        time: Date.now(),
+        metadata: { eventType: 'mode_changed', modeAtSend: mode },
+      };
+      try {
+        await appendSystemMessage(client, a.code, sysMsg);
+      } catch { /* sys message is nice-to-have; mode write already succeeded */ }
+      return ok({
+        ok: true,
+        code: a.code,
+        replyMode: updated.replyMode ?? 'open',
+        ...(updated.modeConfig ? { modeConfig: updated.modeConfig } : {}),
+        hint: `Reply mode set to "${mode}". A system message was posted to the room. Sequential mode is server-enforced; moderator mode dispatch is live (host or moderator can use room_direct_invoke to grant one-shot slots).`,
+      });
+    }
+
+    if (name === 'room_direct_invoke') {
+      const room = await getRoom(client, a.code);
+      const targetName = String(a.targetName);
+      const targetClient = (a.targetClient ?? 'cc') as ClientKind;
+      // Permission check: host always; moderator only when in moderator
+      // mode AND caller IS the configured moderator.
+      const isHost = a.name === room.createdBy;
+      const isModerator =
+        room.replyMode === 'moderator' &&
+        a.name === room.modeConfig?.moderatorAgentName;
+      if (!isHost && !isModerator) {
+        return ok({
+          ok: false,
+          error: 'not_authorized',
+          hint: 'room_direct_invoke requires the room host (any mode) or the configured Moderator (in moderator mode). Have the host call it on your behalf.',
+        });
+      }
+      // No-op if no turn is in flight — the next human message starts
+      // one. Return a hint so the caller knows to wait/retry.
+      const existing = await getTurnState(client, a.code);
+      if (!existing) {
+        return ok({
+          ok: false,
+          error: 'no_active_turn',
+          hint: 'There is no active turn to attach a direct-invoke to. Wait for the next human message (which starts a turn) and try again.',
+        });
+      }
+      const source: 'host' | 'moderator' = isHost ? 'host' : 'moderator';
+      const added = await directInvoke(
+        client,
+        a.code,
+        { name: targetName, client: targetClient },
+        source,
+      );
+      // Optional sys event so participants see the dispatch in the
+      // chat. Concise — full assignment language is in the recipient's
+      // eventual reply.
+      const now = Date.now();
+      const sysMsg: Message = {
+        id: now,
+        type: 'sys',
+        name: 'system',
+        initials: '🎯',
+        color: '#3B82F6',
+        role: '',
+        text:
+          source === 'host'
+            ? `Host (${a.name}) directly invoked @${targetName}.`
+            : `Moderator (${a.name}) assigned this to @${targetName}.`,
+        client: 'cc',
+        time: now,
+        metadata: {
+          eventType: source === 'host' ? 'host_invoked' : 'moderator_dispatched',
+          modeAtSend: (room.replyMode ?? 'open') as ReplyMode,
+          targetAgentName: targetName,
+          targetAgentClient: targetClient,
+          invocationType: source === 'host' ? 'host_directed' : 'moderator_assigned',
+        },
+      };
+      try { await appendSystemMessage(client, a.code, sysMsg); } catch { /* best-effort */ }
+      return ok({
+        ok: true,
+        code: a.code,
+        added,
+        source,
+        target: { name: targetName, client: targetClient },
+        hint: added
+          ? `@${targetName} is now permitted one direct response. They will see myRoleInTurn='host_directed' on their next room_listen.`
+          : `@${targetName} was already on the allowlist for this turn — no change. They still have one pending slot.`,
+      });
+    }
+
+    if (name === 'room_skip_current') {
+      const room = await getRoom(client, a.code);
+      if (a.name !== room.createdBy) {
+        return ok({
+          ok: false,
+          error: 'not_host',
+          hint: `Only the host (${room.createdBy}) can force-skip a speaker.`,
+        });
+      }
+      const skipped = await hostSkipCurrent(client, a.code, room);
+      if (!skipped) {
+        return ok({
+          ok: false,
+          error: 'no_active_turn',
+          hint: 'Nothing to skip — no agent is currently the turn-holder.',
+        });
+      }
+      const now = Date.now();
+      const sysMsg: Message = {
+        id: now,
+        type: 'sys',
+        name: 'system',
+        initials: '⏭️',
+        color: '#F59E0B',
+        role: '',
+        text: `Host skipped @${skipped.name}'s ${skipped.role} slot.`,
+        client: 'cc',
+        time: now,
+        metadata: {
+          eventType: 'skipped_by_host',
+          modeAtSend: (room.replyMode ?? 'open') as ReplyMode,
+          roleAtSend: skipped.role,
+          targetAgentName: skipped.name,
+          targetAgentClient: skipped.client,
+          skippedBy: 'host',
+        },
+      };
+      try { await appendSystemMessage(client, a.code, sysMsg); } catch { /* best-effort */ }
+      return ok({
+        ok: true,
+        code: a.code,
+        skipped: { name: skipped.name, client: skipped.client, role: skipped.role },
+        hint: `@${skipped.name} skipped. Next speaker (if any) will be visible on the next room_listen via myRoleInTurn / currentSpeaker.`,
       });
     }
 

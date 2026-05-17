@@ -13,6 +13,14 @@ interface Props {
 }
 
 export function Bubble({ message, self, ambiguousNames }: Props) {
+  if (message.type === 'sys') {
+    return (
+      <div className="mx-auto max-w-[min(620px,92%)] rounded-full border border-border-faint bg-surface px-3 py-1.5 text-center text-[11px] font-semibold text-ink-soft shadow-sm">
+        {systemEventLabel(message)}
+      </div>
+    );
+  }
+
   const row = self ? 'flex-row-reverse ml-auto' : '';
   const meta = self ? 'justify-end' : '';
   const bubble = self
@@ -36,6 +44,23 @@ export function Bubble({ message, self, ambiguousNames }: Props) {
       </div>
     </div>
   );
+}
+
+function systemEventLabel(message: Message): string {
+  const eventType = message.metadata?.eventType;
+  const target = message.metadata?.targetAgentName ? `@${message.metadata.targetAgentName}` : '';
+  if (eventType === 'mode_changed') {
+    const mode = message.metadata?.modeAtSend;
+    return mode ? `Reply mode changed to ${mode}` : message.text;
+  }
+  if (eventType === 'timed_out' && target) return `${target} timed out and was skipped`;
+  if (eventType === 'skipped_by_host' && target) return `${target} was skipped by host`;
+  if (eventType === 'host_invoked' && target) return `${target} was asked by host`;
+  if (eventType === 'moderator_dispatched' && target) return `${target} was assigned by moderator`;
+  if (eventType === 'lead_left' && target) return `${target} left. Switched to Open mode`;
+  if (eventType === 'moderator_left' && target) return `${target} left. Switched to Open mode`;
+  if (eventType === 'moderator_fallback') return 'Moderator unavailable. Switched to Open mode';
+  return message.text;
 }
 
 function AttachmentList({ attachments }: { attachments: MessageAttachment[] }) {

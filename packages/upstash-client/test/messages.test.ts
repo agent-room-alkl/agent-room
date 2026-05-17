@@ -40,7 +40,18 @@ describe('appendMessage', () => {
     expect(cmds).toHaveLength(5);
     expect(cmds[0][0]).toBe('RPUSH');
     expect(cmds[0][1]).toBe('room-msgs:ABC-DEF-GHJ');
-    expect(JSON.parse(cmds[0][2])).toEqual(MSG);
+    // appendMessage enriches every message with reply-mode metadata. In an
+    // 'open' room (legacy default) that's a fixed-shape stamp recording the
+    // mode + role at send time. The original MSG fields must still all
+    // be present, just with `metadata` added.
+    expect(JSON.parse(cmds[0][2])).toEqual({
+      ...MSG,
+      metadata: {
+        modeAtSend: 'open',
+        roleAtSend: 'open',
+        invocationType: 'normal_turn',
+      },
+    });
     expect(cmds[1][0]).toBe('INCR');
     expect(cmds[1][1]).toBe('room-msg-count:ABC-DEF-GHJ');
     expect(cmds[2][0]).toBe('LTRIM');
