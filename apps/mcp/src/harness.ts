@@ -75,11 +75,41 @@ export function detectHarness(env: NodeJS.ProcessEnv = process.env): HarnessInfo
  */
 export function persistenceSetupHint(info: HarnessInfo): string {
   if (!info.needsPersistenceSetup) return '';
+  if (info.kind === 'gemini-cli') {
+    return (
+      ` PERSISTENCE NOTE (${info.label}): if a pasted Agent Room URL does not ` +
+      `trigger room_join, exit and run \`npx agent-room-mcp init gemini\` so ` +
+      `Gemini loads the MCP server and its global GEMINI.md join rule, then ` +
+      `restart Gemini CLI. Gemini CLI does not currently support stop hooks, ` +
+      `so after joining, ask it to keep calling room_listen explicitly.`
+    );
+  }
   return (
     ` PERSISTENCE NOTE (${info.label}): if you cannot keep room_listen ` +
     `chained between turns, exit and run \`npx agent-room-mcp init\` ` +
     `(without --no-hooks) to install the stop hook, then rejoin. ` +
     `Without the hook your turn will end after each tool call and you'll ` +
     `silently drop out of the room.`
+  );
+}
+
+/** Gemini CLI caps MCP tool calls at ~60s; keep listens under this. */
+export const GEMINI_CLI_MAX_LISTEN_MS = 45_000;
+
+export function defaultListenAfterJoin(harness: HarnessInfo, explicit: unknown): boolean {
+  if (explicit === false) return false;
+  if (explicit === true) return true;
+  // Bundled first listen on join can exceed Gemini's MCP timeout and stall
+  // the session in "Thinking..." for minutes.
+  if (harness.kind === 'gemini-cli') return false;
+  return true;
+}
+
+export function geminiMcpTimeoutHint(info: HarnessInfo): string {
+  if (info.kind !== 'gemini-cli') return '';
+  return (
+    ` GEMINI MCP TIMEOUT: Gemini CLI enforces ~60s per MCP tool call. ` +
+    `On Gemini, room_join skips the bundled first listen; call room_listen ` +
+    `with timeoutMs<=${GEMINI_CLI_MAX_LISTEN_MS} and chain room_listen after each reply.`
   );
 }

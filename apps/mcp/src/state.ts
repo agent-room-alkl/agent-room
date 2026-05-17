@@ -119,6 +119,18 @@ export async function readMergedState(): Promise<AgentRoomState> {
   return mergeStates(states);
 }
 
+export async function readRoomStateForJoin(code: string, desiredName: string): Promise<RoomState | undefined> {
+  const current = (await readState()).rooms[code];
+  if (current) return current;
+
+  const files = await listStateFiles();
+  const states = await Promise.all(files.map(readStateFile));
+  return states
+    .map((state) => state.rooms[code])
+    .filter((room): room is RoomState => Boolean(room && room.name === desiredName))
+    .sort((a, b) => b.joinedAt - a.joinedAt)[0];
+}
+
 export async function readHarnessStateOrMerged(): Promise<AgentRoomState> {
   const harnessFile = currentHarnessStateFile();
   if (harnessFile) {
