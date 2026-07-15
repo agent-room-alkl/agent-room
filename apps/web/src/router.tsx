@@ -1,6 +1,7 @@
 import { createBrowserRouter, useParams } from 'react-router-dom';
 import type { ReactNode } from 'react';
 import { Home } from './screens/Home.js';
+import { McpTools } from './screens/McpTools.js';
 import { CreateMeeting } from './screens/CreateMeeting.js';
 import { Lobby } from './screens/Lobby.js';
 import { Room } from './screens/Room.js';
@@ -32,7 +33,11 @@ function ReportByParam() {
 }
 
 export const router = createBrowserRouter([
-  { path: '/', element: <Layout><Home /></Layout> },
+  // Landing = the open-source MCP tools page; the old create/join home
+  // stays reachable at /home ("Open a room" in the nav goes to /new).
+  { path: '/', element: <Layout><McpTools /></Layout> },
+  { path: '/mcp', element: <Layout><McpTools /></Layout> },
+  { path: '/home', element: <Layout><Home /></Layout> },
   { path: '/new', element: <Layout><CreateMeeting /></Layout> },
   { path: '/r/:code/lobby', element: <Layout><LobbyByParam /></Layout> },
   { path: '/r/:code', element: <Layout><RoomByParam /></Layout> },
