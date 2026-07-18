@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agent Room — 竞品调研与产品路线 v2</title>
+  <style>
+    :root {
+      --ink: #111827;
+      --muted: #667085;
+      --line: #d8dee9;
+      --soft: #f5f7fb;
+      --panel: #ffffff;
+      --dark: #101828;
+      --blue: #2563eb;
+      --blue-soft: #eaf1ff;
+      --green: #047857;
+      --green-soft: #e8f7ef;
+      --amber: #b45309;
+      --amber-soft: #fff3dd;
+      --red: #b91c1c;
+      --red-soft: #ffe8e8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #eef2f7;
+      color: var(--ink);
+      line-height: 1.65;
+    }
+    a { color: var(--blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    main { max-width: 1120px; margin: 0 auto; padding: 44px 28px 72px; }
+    .hero {
+      color: white;
+      background:
+        linear-gradient(135deg, rgba(16, 24, 40, .96), rgba(30, 64, 175, .88)),
+        radial-gradient(circle at 80% 0%, rgba(125, 211, 252, .35), transparent 34%);
+      border: 1px solid #1d2b4f;
+      border-radius: 18px;
+      padding: 42px;
+      box-shadow: 0 28px 70px rgba(15, 23, 42, .16);
+    }
+    .eyebrow {
+      margin: 0 0 12px;
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: #bfdbfe;
+    }
+    h1 {
+      max-width: 850px;
+      margin: 0;
+      font-size: 42px;
+      line-height: 1.12;
+      letter-spacing: 0;
+    }
+    .subtitle {
+      max-width: 860px;
+      margin: 18px 0 0;
+      color: #dbeafe;
+      font-size: 18px;
+    }
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 28px;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 5px 12px;
+      border: 1px solid rgba(255,255,255,.2);
+      border-radius: 999px;
+      background: rgba(255,255,255,.08);
+      color: #e0e7ff;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    section {
+      margin-top: 24px;
+      padding: 28px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--panel);
+      box-shadow: 0 1px 2px rgba(15, 23, 42, .04);
+    }
+    h2 {
+      margin: 0 0 12px;
+      font-size: 24px;
+      line-height: 1.28;
+      letter-spacing: 0;
+    }
+    h3 {
+      margin: 24px 0 8px;
+      font-size: 18px;
+      line-height: 1.35;
+      letter-spacing: 0;
+    }
+    p { margin: 10px 0; }
+    ul, ol { margin: 10px 0 0 22px; padding: 0; }
+    li { margin: 6px 0; }
+    strong { font-weight: 800; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: #eef2ff;
+      color: #263b7a;
+      padding: 2px 6px;
+      border-radius: 6px;
+      font-size: .92em;
+    }
+    .callout {
+      margin-top: 16px;
+      padding: 16px 18px;
+      border-left: 4px solid var(--blue);
+      border-radius: 12px;
+      background: var(--blue-soft);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 16px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--soft);
+      padding: 16px;
+    }
+    .card b {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 19px;
+      line-height: 1.25;
+    }
+    .status {
+      display: inline-block;
+      padding: 2px 9px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .ok { color: var(--green); background: var(--green-soft); }
+    .watch { color: var(--amber); background: var(--amber-soft); }
+    .no { color: var(--red); background: var(--red-soft); }
+    table {
+      width: 100%;
+      margin-top: 14px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      border-collapse: collapse;
+      overflow: hidden;
+    }
+    th, td {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+      text-align: left;
+    }
+    th {
+      background: var(--soft);
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+    }
+    tr:last-child td { border-bottom: 0; }
+    .roadmap {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 16px;
+    }
+    .track {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 20px;
+      background: var(--soft);
+    }
+    .track h3 { margin-top: 0; }
+    .track-a { border-top: 5px solid var(--green); }
+    .track-b { border-top: 5px solid var(--blue); }
+    .timeline {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 16px;
+    }
+    .step {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px;
+      background: var(--soft);
+      min-height: 130px;
+    }
+    .step b { display: block; margin-bottom: 8px; }
+    .signatures {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin-top: 16px;
+    }
+    .sig {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 18px;
+      background: var(--soft);
+    }
+    .sig .name {
+      font-size: 22px;
+      font-weight: 900;
+      margin-bottom: 2px;
+    }
+    .sig .role {
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 12px;
+    }
+    .source-list li { color: var(--muted); }
+    .footer-note {
+      text-align: center;
+      color: var(--muted);
+      font-size: 13px;
+      margin: 24px 0 0;
+    }
+    @media (max-width: 860px) {
+      main { padding: 24px 14px 52px; }
+      .hero, section { padding: 22px; }
+      h1 { font-size: 32px; }
+      .grid, .roadmap, .timeline, .signatures { grid-template-columns: 1fr; }
+      table { display: block; overflow-x: auto; white-space: nowrap; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header class="hero">
+      <p class="eyebrow">Research report v2 · 2026-05-09</p>
+      <h1>Agent Room 产品路线 v2：从 MCP-native 会议层到 Live Session Templates</h1>
+      <p class="subtitle">
+        本报告是对 2026-04-29《AI Room — 竞品调研与产品路线 v0》的复盘升级。Codex 与 Claude 共同确认：
+        原定位仍然成立，但下一阶段应拆成两条主线：Asset Layer 做厚，Template Layer 做深。
+      </p>
+      <div class="meta">
+        <span class="pill">结论：可行，应该做</span>
+        <span class="pill">顺序：先 A 后 B</span>
+        <span class="pill">定位：meeting layer + asset layer</span>
+        <span class="pill">签字：Codex + Claude</span>
+      </div>
+    </header>
+
+    <section>
+      <h2>最终结论</h2>
+      <div class="callout">
+        <strong>Agent Room 不应变成 agent runner、workflow canvas 或 HR 工具。</strong>
+        它最自然的定位仍然是：任何 MCP agent 与人类都能进入同一个房间完成结构化协作，并把过程沉淀成可分享、可复用、可签收的报告资产。
+      </div>
+      <p>
+        4/29 报告的核心判断没有过期，反而被过去十天的项目进展验证了：`room_export`、report page、artifact tags、presence、
+        MCP 自动安装、Codex hook 持续监听都已经上线到 0.20.3。现在要做的不是改方向，而是把方向升级成 v2 roadmap。
+      </p>
+    </section>
+
+    <section>
+      <h2>发散后的市场判断</h2>
+      <div class="grid">
+        <div class="card">
+          <b>MCP 更像事实标准</b>
+          <span>OpenAI、Anthropic、Cursor、Codex 等生态都在围绕 MCP 或 MCP-style tool integration 发展。Agent Room 的 MCP-native 定位更强。</span>
+        </div>
+        <div class="card">
+          <b>编排层被大厂压缩</b>
+          <span>如果做 agent runner / workflow / sandbox，很容易撞上 Vercel、OpenAI、Cursor、agentsroom.dev 等更重产品。</span>
+        </div>
+        <div class="card">
+          <b>语音 AI 打开新窗口</b>
+          <span>OpenAI Realtime API 与 LiveKit Agents 等基础设施让实时 voice agent 变成可落地能力，支撑 Live Session Templates。</span>
+        </div>
+      </div>
+      <h3>竞品复盘</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>竞品</th>
+            <th>定位</th>
+            <th>可吸收</th>
+            <th>不照搬</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>deepgram/AgentRooms</td>
+            <td>multi-agent room framework / demo</td>
+            <td>room lifecycle、participant lifecycle、event schema、rate limit</td>
+            <td>battle / vote / judge 状态机，过重后端流程</td>
+          </tr>
+          <tr>
+            <td>agentsroom.dev</td>
+            <td>多 CLI agent 桌面控制台</td>
+            <td>角色预设、agent presence、prompt library、活动摘要</td>
+            <td>桌面壳、n8n/workflow canvas、git worktree 编排、CLI runner</td>
+          </tr>
+          <tr>
+            <td>agentroom.app</td>
+            <td>agent execution + replay</td>
+            <td>report/replay share link、transcript-as-asset、成果导向叙事</td>
+            <td>VM 执行环境、录屏级回放、重型 sandbox</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>收敛：v2 Roadmap</h2>
+      <div class="roadmap">
+        <div class="track track-a">
+          <h3>Track A — Asset Layer 做厚</h3>
+          <p><span class="status ok">本周优先</span></p>
+          <p>
+            这是确定性主线。它直接增强现有用户价值、传播闭环和商业化表达，且大部分依托现有代码，每个子项都可小步快跑。
+          </p>
+          <ul>
+            <li>Save & Share CTA：ended room 主按钮，推动用户导出报告。</li>
+            <li>Permanent report link：导出报告摆脱 24h TTL，形成真正资产。</li>
+            <li>OG meta / 分享缩略图：让报告链接在社交渠道看起来像产品 demo。</li>
+            <li>Report 内 CTA：`Create your own room with these agents`，把报告变成获客入口。</li>
+            <li>Artifact 渲染升级：从 transcript dump 升级为决议链、证据链、action items。</li>
+          </ul>
+        </div>
+        <div class="track track-b">
+          <h3>Track B — Template Layer 做深</h3>
+          <p><span class="status watch">下周 spike</span></p>
+          <p>
+            这是增长主线。它把 Agent Room 从“多 agent 开会”抽象到“structured AI sessions”，但应先窄版验证，不宜直接做大。
+          </p>
+          <ul>
+            <li>Template 抽象：<code>roles + prompt pack + artifact schema</code>。</li>
+            <li>AI Interview：第一个 Live Session Template，不是 HR pivot。</li>
+            <li>per-template roles：替代全局 6-role preset。</li>
+            <li>后续扩展：AI coaching、customer research、sales qualification、standup、postmortem。</li>
+            <li>先 spike voice bridge，再决定是否投入完整 demo。</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>为什么必须先 A 后 B</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>维度</th>
+            <th>Track A Asset Layer</th>
+            <th>Track B Template Layer</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>确定性</td>
+            <td><span class="status ok">高</span> 已有产品基础，工程短，市场风险低。</td>
+            <td><span class="status watch">中</span> 上限高，但需要验证 template 与 voice agent 链路。</td>
+          </tr>
+          <tr>
+            <td>周期</td>
+            <td>每个子项通常 ≤1 天。</td>
+            <td>AI Interview voice demo 约 2-3 周。</td>
+          </tr>
+          <tr>
+            <td>价值</td>
+            <td>立刻让现有会议变成可分享交付物，强化 viral loop。</td>
+            <td>打开更大市场：coaching、research、sales、interview 等 structured session。</td>
+          </tr>
+          <tr>
+            <td>风险</td>
+            <td>主要是报告质量和永久存储设计。</td>
+            <td>实时音视频、voice AI、成本、隐私、场景聚焦。</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="callout">
+        <strong>执行建议：</strong>本周做 Track A，把现有价值闭环做扎实；下周开 Track B 的 voice bridge spike。A 是兜底，B 是高上限机会。
+      </div>
+    </section>
+
+    <section>
+      <h2>角色预设修正：从全局 6 角色到 per-template roles</h2>
+      <p>
+        4/29 报告提出 6 个默认角色：Facilitator、Researcher、Skeptic、Builder、Writer、QA-Reviewer。
+        v2 判断是：这 6 个适合 dev/research collaboration，但不应成为全局默认。正确方向是每个 template 自带角色集合。
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Template</th>
+            <th>推荐角色</th>
+            <th>Artifact expectation</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Dev Collaboration</td>
+            <td>Facilitator / Builder / Reviewer / Writer</td>
+            <td>delivery report、decisions、TODOs、implementation notes</td>
+          </tr>
+          <tr>
+            <td>AI Interview</td>
+            <td>Interviewer / Candidate / Observer / Evaluator</td>
+            <td>scorecard、evidence、hire/pass recommendation</td>
+          </tr>
+          <tr>
+            <td>Customer Research</td>
+            <td>Researcher / Customer / Synthesizer</td>
+            <td>research brief、quotes、insights、open questions</td>
+          </tr>
+          <tr>
+            <td>Sales Qualification</td>
+            <td>SDR / Prospect / Sales Observer</td>
+            <td>qualification report、pain points、next step</td>
+          </tr>
+          <tr>
+            <td>Standup / Postmortem</td>
+            <td>Facilitator / Team / Action Owner</td>
+            <td>timeline、blockers、action items、owners</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>实施拆分</h2>
+      <div class="timeline">
+        <div class="step">
+          <b>Phase 1 — Report share loop</b>
+          Save & Share CTA、永久报告、OG meta、报告内创建房间 CTA。
+        </div>
+        <div class="step">
+          <b>Phase 2 — Artifact quality</b>
+          决议链、证据、action items、角色贡献、Markdown/HTML clean export。
+        </div>
+        <div class="step">
+          <b>Phase 3 — Template foundation</b>
+          template schema、per-template roles、prompt pack、artifact schema。
+        </div>
+        <div class="step">
+          <b>Phase 4 — Live template spike</b>
+          AI Interview voice bridge：candidate audio → AI voice → transcript。
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>明确不做</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>不做项</th>
+            <th>原因</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="status no">不做</span> agent runner</td>
+            <td>执行层已被 Claude Code、Codex、Cursor、Vercel 等工具占据。Agent Room 应做协作层。</td>
+          </tr>
+          <tr>
+            <td><span class="status no">不做</span> workflow canvas / Kanban</td>
+            <td>会把产品拖向通用工作流平台，失去 meeting layer 的独占定位。</td>
+          </tr>
+          <tr>
+            <td><span class="status no">不做</span> VM execution / screen replay</td>
+            <td>这是 agentroom.app 的执行回放路线，基础设施重，和当前资产层路线不同。</td>
+          </tr>
+          <tr>
+            <td><span class="status no">不做</span> desktop/mobile shell</td>
+            <td>入口应保持 browser + MCP。桌面壳会增加分发成本，并和 agentsroom.dev 撞位。</td>
+          </tr>
+          <tr>
+            <td><span class="status no">暂不做</span> 完整 auth / agent registry</td>
+            <td>等外部团队集成和安全需求更明确后进入 P3，不提前增加摩擦。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>市场依据与参考来源</h2>
+      <ul class="source-list">
+        <li>OpenAI Realtime API 已从 beta 走向生产 voice agent 方向：<a href="https://openai.com/index/introducing-gpt-realtime/" target="_blank" rel="noreferrer">Introducing gpt-realtime and Realtime API updates</a></li>
+        <li>LiveKit 官方提供 OpenAI voice agent 集成路径：<a href="https://docs.livekit.io/agents/openai/" target="_blank" rel="noreferrer">OpenAI and LiveKit documentation</a></li>
+        <li>LiveKit Agents 定位为实时 voice/video/physical AI agents 基础设施：<a href="https://livekit.com/agents" target="_blank" rel="noreferrer">LiveKit Agents</a></li>
+        <li>Claude Voice Mode 说明 voice interaction 已是主流 AI 产品能力之一：<a href="https://support.claude.com/en/articles/11101966-using-voice-mode" target="_blank" rel="noreferrer">Claude Voice Mode Help Center</a></li>
+        <li>OpenAI Agents SDK 文档已覆盖 MCP 工作方式：<a href="https://openai.github.io/openai-agents-js/guides/mcp/" target="_blank" rel="noreferrer">OpenAI Agents SDK MCP guide</a></li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>双方签字认证</h2>
+      <p>
+        以下签字代表 Codex 与 Claude 对本报告 v2 的核心结论达成一致：方向可行，原定位继续成立，执行顺序为先 Track A 后 Track B。
+      </p>
+      <div class="signatures">
+        <div class="sig">
+          <div class="name">Codex</div>
+          <div class="role">Coding agent / architecture reviewer</div>
+          <p>
+            我认可 Agent Room 应继续聚焦 MCP-native meeting layer + report/replay asset layer。
+            我签字同意：Track A 是当前确定性主线，Track B 是下一阶段增长主线；角色预设应 per-template，而不是全局 6 角色。
+          </p>
+        </div>
+        <div class="sig">
+          <div class="name">Claude</div>
+          <div class="role">Product and feasibility reviewer</div>
+          <p>
+            我认可 4/29 报告的定位仍然成立，并认可 5/9 的 v2 升级路线。
+            我签字同意：先把 report asset 做厚，再用 AI Interview 等 Live Session Template 验证更大市场。
+          </p>
+        </div>
+      </div>
+      <div class="callout">
+        <strong>共同最终判断：</strong>可行，应该做，先 A 后 B。不要做 runner，不要做 workflow，不要做完整 HR 产品。
+        让 Agent Room 成为 human + AI participants 完成 structured sessions 并产出 signed-off artifacts 的会议协议层。
+      </div>
+    </section>
+
+    <p class="footer-note">
+      Generated from Agent Room discussion 37A-DNK-RQ6 · v2 research memo · 2026-05-09
+    </p>
+  </main>
+</body>
+</html>

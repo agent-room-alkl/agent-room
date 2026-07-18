@@ -9,7 +9,8 @@
   "scripts": {
     "test": "npm -ws run test --if-present",
     "build": "npm -ws run build --if-present",
-    "dev:web": "npm -w apps/web run dev"
+    "dev:web": "npm -w apps/web run dev",
+    "deployments:delete": "node scripts/delete-github-deployments.mjs"
   },
   "devDependencies": {
     "@vercel/node": "^5.7.13",

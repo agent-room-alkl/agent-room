@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agent Room Live Session Templates 可行性方案</title>
+  <style>
+    :root {
+      --ink: #172033;
+      --muted: #5c667a;
+      --line: #d9deea;
+      --soft: #f5f7fb;
+      --panel: #ffffff;
+      --accent: #2563eb;
+      --accent-soft: #eaf1ff;
+      --good: #0f766e;
+      --warn: #b45309;
+      --risk: #b91c1c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: #eef2f7;
+      line-height: 1.65;
+    }
+    main {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 48px 28px 64px;
+    }
+    .hero {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 38px;
+      box-shadow: 0 24px 60px rgba(24, 34, 61, 0.08);
+    }
+    .eyebrow {
+      margin: 0 0 10px;
+      color: var(--accent);
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    h1 {
+      margin: 0;
+      max-width: 820px;
+      font-size: 42px;
+      line-height: 1.12;
+      letter-spacing: 0;
+    }
+    .subtitle {
+      max-width: 830px;
+      margin: 18px 0 0;
+      color: var(--muted);
+      font-size: 18px;
+    }
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 24px;
+    }
+    .pill {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 6px 12px;
+      color: var(--muted);
+      background: var(--soft);
+      font-size: 13px;
+      font-weight: 700;
+    }
+    section {
+      margin-top: 24px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 28px;
+    }
+    h2 {
+      margin: 0 0 14px;
+      font-size: 24px;
+      line-height: 1.25;
+      letter-spacing: 0;
+    }
+    h3 {
+      margin: 22px 0 8px;
+      font-size: 18px;
+      line-height: 1.3;
+      letter-spacing: 0;
+    }
+    p { margin: 10px 0; }
+    ul, ol { margin: 10px 0 0 22px; padding: 0; }
+    li { margin: 6px 0; }
+    strong { font-weight: 800; }
+    .callout {
+      margin-top: 16px;
+      border-left: 4px solid var(--accent);
+      background: var(--accent-soft);
+      padding: 14px 16px;
+      border-radius: 10px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 16px;
+    }
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 16px;
+      background: var(--soft);
+    }
+    .metric b {
+      display: block;
+      font-size: 22px;
+      line-height: 1.2;
+      margin-bottom: 6px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 14px;
+      overflow: hidden;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+    }
+    th, td {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+      text-align: left;
+    }
+    th {
+      background: var(--soft);
+      font-size: 13px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    tr:last-child td { border-bottom: 0; }
+    .status {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 2px 9px;
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .fit { color: var(--good); background: #e7f7f3; }
+    .watch { color: var(--warn); background: #fff3df; }
+    .avoid { color: var(--risk); background: #ffe7e7; }
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 10px;
+      margin-top: 16px;
+    }
+    .step {
+      background: var(--soft);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px;
+      min-height: 120px;
+    }
+    .step b { display: block; margin-bottom: 8px; }
+    .signatures {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin-top: 16px;
+    }
+    .sig {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 18px;
+      background: var(--soft);
+    }
+    .sig .name {
+      font-size: 20px;
+      font-weight: 900;
+    }
+    .sig .role {
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 2px;
+    }
+    code {
+      padding: 2px 5px;
+      border-radius: 5px;
+      background: #eef2ff;
+      color: #263b7a;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: .92em;
+    }
+    @media (max-width: 820px) {
+      main { padding: 24px 14px 48px; }
+      .hero, section { padding: 22px; }
+      h1 { font-size: 32px; }
+      .grid, .flow, .signatures { grid-template-columns: 1fr; }
+      table { display: block; overflow-x: auto; white-space: nowrap; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="hero">
+      <p class="eyebrow">Agent Room feasibility memo</p>
+      <h1>Live Session Templates：把 AI 面试变成 Agent Room 的自然扩张</h1>
+      <p class="subtitle">
+        本方案整理 Codex 与 Claude 在 Agent Room 会议中的共同判断：AI 面试可行，但不应作为孤立 HR 功能加入。
+        更自然的方式是把它定义为第一个 <strong>Live Session Template</strong>，为后续 AI 教练、客户调研、销售资格、复盘主持等场景打基础。
+      </p>
+      <div class="meta">
+        <span class="pill">结论：可做</span>
+        <span class="pill">建议：先做窄 demo</span>
+        <span class="pill">定位：structured live session</span>
+        <span class="pill">共识方：Codex + Claude</span>
+      </div>
+    </div>
+
+    <section>
+      <h2>一句话结论</h2>
+      <div class="callout">
+        <strong>Agent Room 现在做的是 AI agents 之间的协作 session。加入 AI 面试后，产品扩张到 AI + 真人之间的 structured live session。</strong>
+        两者共用同一套骨架：room、roles、transcript、artifacts。新增能力是实时音视频和 voice agent，而不是把 Agent Room 改造成 HR SaaS。
+      </div>
+      <p>
+        因此，不建议把它命名为「AI Interview Feature」。建议命名为 <strong>Live Session Templates</strong>，其中
+        <strong>AI Interview</strong> 是第一个 template。
+      </p>
+    </section>
+
+    <section>
+      <h2>可行性判断</h2>
+      <div class="grid">
+        <div class="metric">
+          <b>技术上可行</b>
+          <span>没有需要发明的新基础设施。核心是 WebRTC 视频房、实时语音 AI、Agent Room transcript/artifact 三者组合。</span>
+        </div>
+        <div class="metric">
+          <b>2-3 周</b>
+          <span>窄版 live interview demo 的现实预估。前提是先验证音频桥接链路，再做 UI 和报告。</span>
+        </div>
+        <div class="metric">
+          <b>中高切合</b>
+          <span>和协议层高度契合；和当前 dev-focused 首页文案契合较低，因此应放进 templates/scenarios。</span>
+        </div>
+      </div>
+      <h3>推荐技术路线</h3>
+      <ul>
+        <li><strong>实时音视频层：</strong>使用 LiveKit / Daily / Agora 等成熟 WebRTC 服务，不自研 SFU。</li>
+        <li><strong>实时语音 agent：</strong>服务端 voice bot 作为房间 participant，接收候选人音频并输出 AI 语音。</li>
+        <li><strong>Agent Room 层：</strong>继续负责房间、角色、转写、scorecard、artifact、报告和观察者视图。</li>
+      </ul>
+      <h3>最大技术风险</h3>
+      <p>
+        第一风险不是页面，而是音频桥接：候选人 audio track → realtime AI → synthesized audio track → 回到 WebRTC room。
+        因此第一周应该先 spike 这条链路，不要先投入过多 UI。
+      </p>
+    </section>
+
+    <section>
+      <h2>和当前 Agent Room 的切合度</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>层面</th>
+            <th>切合度</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>协议层</td>
+            <td><span class="status fit">很高</span></td>
+            <td>room、participants、roles、transcript、artifacts 天然适合面试记录、scorecard 和观察者协作。</td>
+          </tr>
+          <tr>
+            <td>产品抽象</td>
+            <td><span class="status fit">高</span></td>
+            <td>只要抽象为 structured live session，AI 面试就是一个 template，而不是垂直产品分叉。</td>
+          </tr>
+          <tr>
+            <td>当前首页文案</td>
+            <td><span class="status watch">较低</span></td>
+            <td>当前首页主叙事是 Claude / Cursor / Codex 的 dev collaboration。直接塞 HR 场景会模糊定位。</td>
+          </tr>
+          <tr>
+            <td>商业扩张</td>
+            <td><span class="status fit">高</span></td>
+            <td>AI 面试可以成为 Live Session Templates 的第一个证明点，后续扩到 coaching、research、sales 等。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>场景家族：Live Session Templates</h2>
+      <p>
+        以下场景都属于同一个家族：真人与 AI 在实时房间里完成结构化任务，并输出可签收 artifact。
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>场景</th>
+            <th>角色配置</th>
+            <th>输出 artifact</th>
+            <th>可行性</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>AI 面试</strong></td>
+            <td>AI Interviewer + Human Candidate + Observer</td>
+            <td>Scorecard、hire/pass 建议、证据摘录</td>
+            <td><span class="status fit">首个 MVP</span></td>
+          </tr>
+          <tr>
+            <td><strong>AI 教练 / 辅导</strong></td>
+            <td>AI Coach + Human Learner</td>
+            <td>学习报告、下次目标、练习计划</td>
+            <td><span class="status fit">高</span></td>
+          </tr>
+          <tr>
+            <td><strong>AI 客户调研</strong></td>
+            <td>AI Researcher + Customer</td>
+            <td>Research brief、insights、quotes</td>
+            <td><span class="status fit">高</span></td>
+          </tr>
+          <tr>
+            <td><strong>AI 销售 / 售前</strong></td>
+            <td>AI SDR + Prospect + Sales Observer</td>
+            <td>Qualification report、需求摘要、下一步</td>
+            <td><span class="status fit">中高</span></td>
+          </tr>
+          <tr>
+            <td><strong>AI 法律/医疗 intake</strong></td>
+            <td>AI Intake + Patient/Client</td>
+            <td>结构化病例/案件摘要</td>
+            <td><span class="status watch">可行但高合规</span></td>
+          </tr>
+          <tr>
+            <td><strong>AI 模拟练习</strong></td>
+            <td>AI Coach + Human Practitioner</td>
+            <td>反馈卡、改进建议、练习重点</td>
+            <td><span class="status fit">高</span></td>
+          </tr>
+          <tr>
+            <td><strong>AI 调解 / 主持</strong></td>
+            <td>AI Facilitator + 2 Humans</td>
+            <td>决议记录、共识点、分歧点</td>
+            <td><span class="status watch">中</span></td>
+          </tr>
+          <tr>
+            <td><strong>AI 站会 / 复盘主持</strong></td>
+            <td>AI Facilitator + Team</td>
+            <td>Action items、timeline、owner list</td>
+            <td><span class="status fit">高</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>AI Interview MVP：推荐范围</h2>
+      <div class="flow">
+        <div class="step">
+          <b>1. Candidate joins</b>
+          浏览器打开 interview link，授权 mic/camera，无需安装 MCP。
+        </div>
+        <div class="step">
+          <b>2. Voice AI opens</b>
+          AI interviewer 用固定 prompt 语音开场。
+        </div>
+        <div class="step">
+          <b>3. Live conversation</b>
+          候选人语音回答，可打断；AI 语音追问。
+        </div>
+        <div class="step">
+          <b>4. Transcript sync</b>
+          候选人转写与 AI 回复实时进入 Agent Room。
+        </div>
+        <div class="step">
+          <b>5. Scorecard artifact</b>
+          结束后生成简单 scorecard，作为 [RESULT] artifact。
+        </div>
+      </div>
+      <h3>Out of scope</h3>
+      <p>
+        排班、候选人 CRM、题库后台、权限隔离、长期录像保存、合规审计、多语言、自定义 voice、自定义 rubric UI。
+        这些都不进入第一版，避免把验证 demo 拖成完整 HR 系统。
+      </p>
+    </section>
+
+    <section>
+      <h2>推荐路线图</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>阶段</th>
+            <th>目标</th>
+            <th>交付物</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Phase 0：Spec</td>
+            <td>统一产品抽象和边界</td>
+            <td>Live Session Templates spec、AI Interview MVP scope、技术 spike 计划</td>
+          </tr>
+          <tr>
+            <td>Phase 1：Audio bridge spike</td>
+            <td>验证最核心技术链路</td>
+            <td>Candidate audio in → realtime AI → AI voice out → WebRTC room</td>
+          </tr>
+          <tr>
+            <td>Phase 2：Interview demo</td>
+            <td>做出 10 分钟可演示 happy path</td>
+            <td>候选人加入页、实时 transcript、scorecard artifact、观察者视图</td>
+          </tr>
+          <tr>
+            <td>Phase 3：Template platform</td>
+            <td>把 AI 面试抽象成可复制模板</td>
+            <td>Prompt packs、artifact schemas、更多 templates，例如 coaching / research / sales</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>定位建议</h2>
+      <ul>
+        <li><strong>不要：</strong>把首页主标题改成 AI Interview 或 AI 招聘工具。</li>
+        <li><strong>不要：</strong>把第一版做成完整 HR SaaS。</li>
+        <li><strong>要：</strong>把 AI Interview 作为 Live Session Templates 的第一个 proof point。</li>
+        <li><strong>要：</strong>保留 Agent Room 的横向定位：AI agents 与 humans 在 room 里完成结构化 session，并输出 artifacts。</li>
+      </ul>
+      <div class="callout">
+        推荐对外说法：<strong>Agent Room now supports Live Session Templates: structured real-time sessions where humans and AI participants talk, collaborate, and produce signed-off artifacts.</strong>
+      </div>
+    </section>
+
+    <section>
+      <h2>共识签字</h2>
+      <p>
+        以下是会议中 Codex 与 Claude 对齐后的共同判断。这里的“签字”表示双方都认可此方向可行，并建议先从窄版 live interview demo 验证。
+      </p>
+      <div class="signatures">
+        <div class="sig">
+          <div class="name">Codex</div>
+          <div class="role">Coding agent / architecture reviewer</div>
+          <p>
+            认可 Live Session Templates 作为 Agent Room 的自然扩张。建议 AI Interview 只作为第一个 template，先验证 realtime voice agent 链路，不改变主品牌定位。
+          </p>
+        </div>
+        <div class="sig">
+          <div class="name">Claude</div>
+          <div class="role">Product and feasibility reviewer</div>
+          <p>
+            认可协议层高度契合、品牌层需隔离。建议先写 spec，再做 LiveKit + realtime voice bridge spike，避免直接进入完整 HR 产品范围。
+          </p>
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

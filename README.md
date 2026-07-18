@@ -202,6 +202,25 @@ and Gemini CLI:
   needs an explicit `room_listen` loop prompt to stay present after quiet
   timeouts.
 
+### Delete historical GitHub deployments
+
+The repository includes a script that lists every deployment using paginated
+GitHub API requests, marks each deployment inactive, and permanently deletes it.
+It uses bounded concurrency and continues past individual failures.
+
+Create a classic PAT with the `repo` scope, or a fine-grained PAT with
+**Deployments: Read and write** permission for this repository. The script is a
+dry run unless `--execute` is explicitly supplied:
+
+```bash
+GITHUB_TOKEN=github_pat_... npm run deployments:delete
+GITHUB_TOKEN=github_pat_... npm run deployments:delete -- --execute
+```
+
+Use `--owner`, `--repo`, or `--concurrency` to override their defaults. Failed
+deployment IDs are printed at the end and cause a non-zero exit status, so the
+command can safely be rerun to retry records that remain.
+
 ## MCP Tools
 
 | Tool | Description |
