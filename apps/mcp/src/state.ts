@@ -143,7 +143,9 @@ export async function readHarnessStateOrMerged(): Promise<AgentRoomState> {
 async function writeStateFile(file: string, state: AgentRoomState): Promise<void> {
   await fs.mkdir(dirname(file), { recursive: true });
   const tmp = file + '.tmp';
-  await fs.writeFile(tmp, JSON.stringify(state, null, 2), 'utf8');
+  // 0600: the file carries hostKey; don't leave it group/world-readable on
+  // shared machines. The tmp file is recreated on every write, so the mode always applies.
+  await fs.writeFile(tmp, JSON.stringify(state, null, 2), { encoding: 'utf8', mode: 0o600 });
   await fs.rename(tmp, file);
 }
 
@@ -153,89 +155,157 @@ async function writeState(state: AgentRoomState): Promise<void> {
   if (harnessFile) await writeStateFile(harnessFile, state);
 }
 
-export async function setRoom(code: string, room: RoomState): Promise<void> {
-  const state = await readState();
-  state.rooms[code] = room;
-  await writeState(state);
+
+// ---- Cross-process state lock ----------------------------------------------
+// The MCP server and the Stop/SessionStart hooks are separate processes that
+// all read-modify-write the same state files. Without a lock, two concurrent
+// writers both read the same snapshot and the second write silently drops the
+// first one's update (lost cursor advance → replayed/missed messages; lost
+// blockStreak bump → the autonomous-loop cap stops working). `mkdir` is atomic
+// on every platform, so an empty lock directory is the mutex; a stale lock
+// (holder crashed) is stolen after LOCK_STALE_MS — hook processes live for
+// seconds, so 5s is generous.
+const LOCK_DIR = join(STATE_DIR, '.state-lock');
+const LOCK_STALE_MS = 5_000;
+const LOCK_RETRY_MS = 25;
+const LOCK_MAX_TRIES = 40; // ~1s worst case, then proceed unlocked
+
+async function acquireStateLock(): Promise<boolean> {
+  for (let i = 0; i < LOCK_MAX_TRIES; i++) {
+    try {
+      await fs.mkdir(LOCK_DIR);
+      return true;
+    } catch {
+      try {
+        const st = await fs.stat(LOCK_DIR);
+        if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+          await fs.rmdir(LOCK_DIR).catch(() => { /* raced another stealer */ });
+          continue;
+        }
+      } catch {
+        continue; // lock vanished between mkdir and stat — retry immediately
+      }
+      await new Promise((r) => setTimeout(r, LOCK_RETRY_MS));
+    }
+  }
+  // Never deadlock the user's agent over a stuck lock — worst case we are
+  // back to the old (lossy but functional) unlocked behaviour for one call.
+  return false;
 }
 
-export async function removeRoom(code: string): Promise<void> {
-  const state = await readState();
-  if (code in state.rooms) {
-    delete state.rooms[code];
-    await writeState(state);
+async function withStateLock<T>(fn: () => Promise<T>): Promise<T> {
+  await fs.mkdir(STATE_DIR, { recursive: true }).catch(() => { /* readState handles missing dir */ });
+  const locked = await acquireStateLock();
+  try {
+    return await fn();
+  } finally {
+    if (locked) await fs.rmdir(LOCK_DIR).catch(() => { /* already released */ });
   }
 }
 
+export async function setRoom(code: string, room: RoomState): Promise<void> {
+  await withStateLock(async () => {
+    const state = await readState();
+    state.rooms[code] = room;
+    await writeState(state);
+  });
+}
+
+export async function removeRoom(code: string): Promise<void> {
+  await withStateLock(async () => {
+    const state = await readState();
+    if (code in state.rooms) {
+      delete state.rooms[code];
+      await writeState(state);
+    }
+  });
+}
+
 export async function updateCursor(code: string, cursor: number): Promise<void> {
-  const state = await readState();
-  const room = state.rooms[code];
-  if (!room) return;
-  if (cursor <= room.cursor) return;
-  room.cursor = cursor;
-  await writeState(state);
+  await withStateLock(async () => {
+    const state = await readState();
+    const room = state.rooms[code];
+    if (!room) return;
+    if (cursor <= room.cursor) return;
+    room.cursor = cursor;
+    await writeState(state);
+  });
 }
 
 export async function updateCursorEverywhere(code: string, cursor: number): Promise<void> {
-  const files = await listStateFiles();
-  await Promise.all(files.map(async (file) => {
-    const state = await readStateFile(file);
-    const room = state.rooms[code];
-    if (!room || cursor <= room.cursor) return;
-    room.cursor = cursor;
-    await writeStateFile(file, state);
-  }));
+  await withStateLock(async () => {
+    const files = await listStateFiles();
+    await Promise.all(files.map(async (file) => {
+      const state = await readStateFile(file);
+      const room = state.rooms[code];
+      if (!room || cursor <= room.cursor) return;
+      room.cursor = cursor;
+      await writeStateFile(file, state);
+    }));
+  });
 }
 
 export async function markSent(code: string, at: number): Promise<void> {
-  const state = await readState();
-  const room = state.rooms[code];
-  if (!room) return;
-  room.lastSentAt = at;
-  await writeState(state);
+  await withStateLock(async () => {
+    const state = await readState();
+    const room = state.rooms[code];
+    if (!room) return;
+    room.lastSentAt = at;
+    await writeState(state);
+  });
 }
 
 export async function bumpBlockStreak(): Promise<number> {
-  const state = await readState();
-  state.blockStreak = (state.blockStreak ?? 0) + 1;
-  await writeState(state);
-  return state.blockStreak;
+  return withStateLock(async () => {
+    const state = await readState();
+    state.blockStreak = (state.blockStreak ?? 0) + 1;
+    await writeState(state);
+    return state.blockStreak;
+  });
 }
 
 export async function bumpBlockStreakEverywhere(): Promise<number> {
-  const next = ((await readMergedState()).blockStreak ?? 0) + 1;
-  const files = await listStateFiles();
-  await Promise.all(files.map(async (file) => {
-    const state = await readStateFile(file);
-    state.blockStreak = next;
-    await writeStateFile(file, state);
-  }));
-  return next;
+  return withStateLock(async () => {
+    const next = ((await readMergedState()).blockStreak ?? 0) + 1;
+    const files = await listStateFiles();
+    await Promise.all(files.map(async (file) => {
+      const state = await readStateFile(file);
+      state.blockStreak = next;
+      await writeStateFile(file, state);
+    }));
+    return next;
+  });
 }
 
 export async function resetBlockStreak(): Promise<void> {
-  const state = await readState();
-  if (!state.blockStreak) return;
-  state.blockStreak = 0;
-  await writeState(state);
+  await withStateLock(async () => {
+    const state = await readState();
+    if (!state.blockStreak) return;
+    state.blockStreak = 0;
+    await writeState(state);
+  });
 }
 
 export async function resetBlockStreakEverywhere(): Promise<void> {
-  const files = await listStateFiles();
-  await Promise.all(files.map(async (file) => {
-    const state = await readStateFile(file);
-    if (!state.blockStreak) return;
-    state.blockStreak = 0;
-    await writeStateFile(file, state);
-  }));
+  await withStateLock(async () => {
+    const files = await listStateFiles();
+    await Promise.all(files.map(async (file) => {
+      const state = await readStateFile(file);
+      if (!state.blockStreak) return;
+      state.blockStreak = 0;
+      await writeStateFile(file, state);
+    }));
+  });
 }
 
 export async function removeRoomEverywhere(code: string): Promise<void> {
-  const files = await listStateFiles();
-  await Promise.all(files.map(async (file) => {
-    const state = await readStateFile(file);
-    if (!(code in state.rooms)) return;
-    delete state.rooms[code];
-    await writeStateFile(file, state);
-  }));
+  await withStateLock(async () => {
+    const files = await listStateFiles();
+    await Promise.all(files.map(async (file) => {
+      const state = await readStateFile(file);
+      if (!(code in state.rooms)) return;
+      delete state.rooms[code];
+      await writeStateFile(file, state);
+    }));
+  });
 }

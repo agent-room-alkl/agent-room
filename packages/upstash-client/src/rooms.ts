@@ -34,6 +34,17 @@ export interface CreateRoomInput {
   ownerId?: string;
   ownerEmail?: string;
   ownerName?: string;
+  projectId?: string;
+  projectName?: string;
+  appId?: string;
+  // Seed the project prompt at creation — used by the revive/recreate path so
+  // a recreated room keeps the prompt (and its version counter) the original
+  // room had. Fresh rooms leave these unset; the host edits via
+  // setProjectPrompt.
+  projectPrompt?: string;
+  projectMemoryContext?: string;
+  projectPromptVersion?: number;
+  projectPromptUpdatedAt?: number;
 }
 
 // createRoom now returns the Room PLUS a one-time `hostKey`. The host stores
@@ -55,6 +66,9 @@ export async function createRoom(client: UpstashClient, input: CreateRoomInput):
     ownerId: input.ownerId,
     ownerEmail: input.ownerEmail,
     ownerName: input.ownerName,
+    projectId: input.projectId,
+    projectName: input.projectName,
+    appId: input.appId,
     status: 'active',
     version: 1,
     participants: [],
@@ -65,6 +79,12 @@ export async function createRoom(client: UpstashClient, input: CreateRoomInput):
     // field on the very first room_join response — clients can render the
     // mode chip without waiting for a setReplyMode round-trip.
     replyMode: 'open',
+    // Empty string never stored — '' means "no prompt", represented as the
+    // absent field (JSON.stringify drops undefined).
+    projectPrompt: input.projectPrompt || undefined,
+    projectMemoryContext: input.projectMemoryContext || undefined,
+    projectPromptVersion: input.projectPromptVersion,
+    projectPromptUpdatedAt: input.projectPromptUpdatedAt,
   };
   await client.command(['SET', roomKey(input.code), JSON.stringify(room), 'EX', ROOM_TTL_SECONDS]);
   return { ...room, hostKey };
@@ -100,7 +120,10 @@ export async function casRoom(
     // window is acceptable here because the only mutable field is `participants`, and messages
     // (the hot path) use atomic RPUSH. Version bumps make drift visible if it ever matters.
     next.version = current.version + 1;
-    await client.command(['SET', roomKey(code), JSON.stringify(next), 'EX', ROOM_TTL_SECONDS]);
+    // KEEPTTL preserves the 24h deadline createRoom set, so a room is a hard
+    // cap from creation — activity (joins, presence heartbeats) no longer
+    // slides the expiry forward, which is what kept rooms alive past 24h.
+    await client.command(['SET', roomKey(code), JSON.stringify(next), 'KEEPTTL']);
     return next;
   }
   throw lastError instanceof ConcurrencyError ? lastError : new ConcurrencyError();
@@ -114,6 +137,32 @@ export class HostNameTakenError extends Error {
     super(`The name "${host}" is reserved for the room host. Please pick a different display name.`);
     this.name = 'HostNameTakenError';
   }
+}
+
+// Thrown when a second candidate tries to join an interview room that is
+// already in use. Interview rooms are 1-on-1 by design: host (web) + AI
+// Interviewer (cc) + at most one candidate (web). The invite link is the
+// candidate's exclusive seat — share a fresh room for each interview.
+export class InterviewRoomBusyError extends Error {
+  constructor(_code: string) {
+    super(`This interview is already in progress. Please ask the host for a fresh invite link.`);
+    this.name = 'InterviewRoomBusyError';
+  }
+}
+
+// Interview rooms are identified by topic substring (set at createRoom time
+// to "AI Interview"). Kept as a function rather than a regex to mirror the
+// existing convention already in Join.tsx / Room.tsx / Report.tsx.
+function isInterviewTopic(topic: string): boolean {
+  return topic.toLowerCase().includes('interview');
+}
+
+// A candidate seat is "web client + not the host". The AI Interviewer joins
+// as client='cc' so it never counts as a candidate, and the host's own row
+// is excluded by name (createdBy). MCP-driven agents (Cursor, Codex, etc.)
+// are also client='cc' so they can still observe an interview room.
+function isCandidateSeat(p: Participant, createdBy: string): boolean {
+  return p.client === 'web' && p.name !== createdBy;
 }
 
 // Identity is (name, client). Same name + same client from the same logical
@@ -140,6 +189,9 @@ export interface JoinRoomOptions {
   // gets updated in place. Without it, the join is treated as fresh and
   // collisions get suffixed.
   priorIdentity?: { name: string; client: 'web' | 'cc' };
+  // Authenticated Clerk user id. When it matches room.ownerId, join reclaims
+  // the host slot under the canonical createdBy name and evicts stale host rows.
+  authedUserId?: string | null;
 }
 
 // Returns the updated Room with an extra `participant` field showing the
@@ -149,11 +201,19 @@ export interface JoinRoomOptions {
 // was actually assigned.
 export type JoinRoomResult = Room & { participant: Participant };
 
+function namesEqualIgnoreCase(a: string, b: string): boolean {
+  return a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
 function isPriorIdentity(
   p: Participant,
   priorIdentity: JoinRoomOptions['priorIdentity'],
 ): boolean {
-  return Boolean(priorIdentity && p.name === priorIdentity.name && p.client === priorIdentity.client);
+  return Boolean(
+    priorIdentity
+    && p.client === priorIdentity.client
+    && namesEqualIgnoreCase(p.name, priorIdentity.name),
+  );
 }
 
 function uniqueNameForRoom(
@@ -166,7 +226,7 @@ function uniqueNameForRoom(
       .filter(p => !isPriorIdentity(p, priorIdentity))
       .map(p => p.name),
   );
-  if (!taken.has(desiredName) || desiredName === current.createdBy) return desiredName;
+  if (!taken.has(desiredName) || namesEqualIgnoreCase(desiredName, current.createdBy)) return desiredName;
 
   let n = 2;
   let candidate = `${desiredName} (${n})`;
@@ -197,15 +257,38 @@ export async function joinRoom(
   let outParticipant = participant;
   const room = await casRoom(client, code, (current) => {
     let next = { ...participant };
-    const isClaimingHost = participant.name === current.createdBy;
+    const isOwnerReclaim = Boolean(
+      options.authedUserId && current.ownerId && options.authedUserId === current.ownerId,
+    );
+    // Host claim: exact/case-insensitive createdBy match, or signed-in room owner.
+    const isClaimingHost = isOwnerReclaim || namesEqualIgnoreCase(participant.name, current.createdBy);
+
+    // Interview rooms are 1-on-1 by design: at most one candidate (web,
+    // non-host) seat per invite link. Reject a second candidate before
+    // we touch the participants list. Host re-joins (covered above by
+    // verifyHostKey) and cc agents (AI Interviewer, MCP observers) are
+    // not gated here. priorIdentity lets the SAME candidate refresh.
+    if (
+      isInterviewTopic(current.topic)
+      && !isClaimingHost
+      && isCandidateSeat(participant, current.createdBy)
+    ) {
+      const existingCandidates = current.participants.filter(p => isCandidateSeat(p, current.createdBy));
+      const isReturningSelf = existingCandidates.some(p => isPriorIdentity(p, options.priorIdentity));
+      if (existingCandidates.length > 0 && !isReturningSelf) {
+        throw new InterviewRoomBusyError(current.code);
+      }
+    }
 
     if (isClaimingHost) {
-      // The host slot is gated by hostKey, but the verification is async
-      // (crypto.subtle.digest) so it can't run inside this synchronous
-      // mutator. Callers MUST call verifyHostKey() first when they intend
+      // The host slot is gated by hostKey/ownerId, but the verification is
+      // async (crypto.subtle.digest) so it can't run inside this synchronous
+      // mutator. Callers MUST call verifyHostClaim() first when they intend
       // to claim the host name; that pre-flight throws HostNameTakenError
       // if the key is wrong. Reaching this branch means the caller has
       // already proven they own the host slot.
+      // Canonicalize to room.createdBy so "Robin"/"robin" never fork Host.
+      next = { ...next, name: current.createdBy };
     } else {
       // Non-host name collision: names are room-visible labels, so keep
       // them unique across client kinds too (web Robin vs agent Robin).
@@ -239,13 +322,14 @@ export async function joinRoom(
     // to tell the agent whether it can speak immediately).
     outParticipant = next;
 
-    // Replace the row matching priorIdentity if given, otherwise replace by
-    // the (final) (name, client) tuple. This makes refreshes idempotent
-    // without losing earlier presence data.
+    // Replace priorIdentity / same (name, client). On host reclaim, also
+    // drop every stale web row that matches createdBy case-insensitively
+    // so "Robin" + "robin" never coexist with a wrong Host badge.
     const keep = current.participants.filter(p => {
-      if (options.priorIdentity
-        && p.name === options.priorIdentity.name
-        && p.client === options.priorIdentity.client) return false;
+      if (isClaimingHost && p.client === 'web' && namesEqualIgnoreCase(p.name, current.createdBy)) {
+        return false;
+      }
+      if (isPriorIdentity(p, options.priorIdentity)) return false;
       return !(p.name === next.name && p.client === next.client);
     });
 
@@ -260,18 +344,39 @@ export async function joinRoom(
 // callers proceed to joinRoom() which trusts that the host claim was
 // validated. Splitting verify+write avoids putting async crypto work inside
 // the synchronous CAS mutator above.
+// Validate a claim to the host slot. Accepts EITHER proof:
+//   1. a hostKey whose hash matches room.hostKeyHash (the browser-stored token), OR
+//   2. an authenticated Clerk user whose id === room.ownerId (the account that
+//      owns the room).
+// The owner-identity path is what lets a signed-in owner stay the host even when
+// the hostKey was lost — it's cleared on sign-out, on a different browser, or by
+// the client's "you're not signed in as the owner" cleanup, and the server only
+// ever stored the key's HASH so it cannot be re-handed out. Without this, losing
+// the key permanently locked the real owner out of their own room.
+// Anonymous rooms (no ownerId) and the bare-key path are unchanged, so a caller
+// who only has the room code still cannot impersonate the host.
+export async function verifyHostClaim(
+  client: UpstashClient,
+  code: string,
+  proof: { hostKey?: string | undefined; authedUserId?: string | null },
+): Promise<void> {
+  const room = await getRoom(client, code);
+  // Legacy rooms created before hostKeyHash existed: allow any claim.
+  if (!room.hostKeyHash) return;
+  // Authenticated room owner is always the host, key or no key.
+  if (proof.authedUserId && room.ownerId && proof.authedUserId === room.ownerId) return;
+  if (!proof.hostKey) throw new HostNameTakenError(room.createdBy);
+  const hash = await sha256Hex(proof.hostKey);
+  if (hash !== room.hostKeyHash) throw new HostNameTakenError(room.createdBy);
+}
+
+// Back-compat thin wrapper: key-only verification (no authenticated identity).
 export async function verifyHostKey(
   client: UpstashClient,
   code: string,
   hostKey: string | undefined,
 ): Promise<void> {
-  const room = await getRoom(client, code);
-  // Legacy rooms created before hostKeyHash existed: allow any claim. New
-  // rooms (post this change) must always present a key.
-  if (!room.hostKeyHash) return;
-  if (!hostKey) throw new HostNameTakenError(room.createdBy);
-  const hash = await sha256Hex(hostKey);
-  if (hash !== room.hostKeyHash) throw new HostNameTakenError(room.createdBy);
+  return verifyHostClaim(client, code, { hostKey });
 }
 
 // Mute or unmute a participant. Host-only. Mute flips `canSpeak` to false
@@ -333,8 +438,11 @@ export function findSpeaker(
   return p;
 }
 
-// Set or clear reply-mode coordination on a room. Host-only. Switching
-// modes mid-conversation is supported; any in-flight turn state is cleared.
+// Set or clear reply-mode coordination on a room. Host-only. AI Interview
+// rooms (topic includes "interview") are rejected — they have their own
+// 1-on-1 flow that is incompatible with multi-agent turn-taking. Switching
+// modes mid-conversation is supported; Slice B will additionally clear any
+// in-flight turn state on switch (lazy-cleared on next listen/send).
 //
 // Validates that the right fields are present for the requested mode:
 //   - 'open':       config can be empty / undefined
@@ -353,6 +461,17 @@ export class InvalidModeConfigError extends Error {
   }
 }
 
+export class ModeNotSupportedError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = 'ModeNotSupportedError';
+  }
+}
+
+function isInterviewTopicValue(topic: string): boolean {
+  return topic.toLowerCase().includes('interview');
+}
+
 export async function setReplyMode(
   client: UpstashClient,
   code: string,
@@ -363,6 +482,11 @@ export async function setReplyMode(
   const updated = await casRoom(client, code, (current) => {
     if (current.createdBy !== requesterName) {
       throw new NotHostError(requesterName, current.createdBy);
+    }
+    if (isInterviewTopicValue(current.topic)) {
+      throw new ModeNotSupportedError(
+        'AI Interview rooms run a fixed 1-on-1 flow and do not support reply-mode switching.',
+      );
     }
     if (mode === 'moderator') {
       if (!config?.moderatorAgentName || !config?.moderatorAgentClient) {
@@ -399,6 +523,25 @@ export async function setReplyMode(
   // module unaware of turnState internals.
   await client.command(['DEL', `turn-state:${code}`]);
   return updated;
+}
+
+// Set or clear the room's host-editable project prompt. An empty string
+// clears it (the field is dropped, not stored as ''). Every successful write
+// — set or clear — bumps projectPromptVersion and stamps
+// projectPromptUpdatedAt so clients (and prompt-cache keys) can tell edits
+// apart. Authorization is the caller's job: api/room.ts gates this behind
+// verifyHostClaim (hostKey or signed-in owner), mirroring other host actions.
+export async function setProjectPrompt(
+  client: UpstashClient,
+  code: string,
+  prompt: string,
+): Promise<Room> {
+  return casRoom(client, code, (current) => ({
+    ...current,
+    projectPrompt: prompt || undefined,
+    projectPromptVersion: (current.projectPromptVersion ?? 0) + 1,
+    projectPromptUpdatedAt: Date.now(),
+  }));
 }
 
 /**

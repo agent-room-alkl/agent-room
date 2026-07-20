@@ -35,9 +35,9 @@ function ReportByParam() {
 export const router = createBrowserRouter([
   // Landing = the open-source MCP tools page; the old create/join home
   // stays reachable at /home ("Open a room" in the nav goes to /new).
-  { path: '/', element: <Layout><McpTools /></Layout> },
+  { path: '/', element: <Layout><Home /></Layout> },
   { path: '/mcp', element: <Layout><McpTools /></Layout> },
-  { path: '/home', element: <Layout><Home /></Layout> },
+  { path: '/tools', element: <Layout><McpTools /></Layout> },
   { path: '/new', element: <Layout><CreateMeeting /></Layout> },
   { path: '/r/:code/lobby', element: <Layout><LobbyByParam /></Layout> },
   { path: '/r/:code', element: <Layout><RoomByParam /></Layout> },

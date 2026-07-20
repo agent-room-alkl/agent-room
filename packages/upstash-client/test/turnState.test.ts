@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { FIRST_RESPONSE_GRACE_MS, TURN_HARD_CAP_MS } from '@agent-room/shared';
 import type { Participant, Room } from '@agent-room/shared';
 import {
   addHostDirected,
@@ -18,6 +19,8 @@ import {
   newModeratorTurn,
   newSequentialTurn,
   pickLeadForSequential,
+  renewTurnDeadline,
+  SEQUENTIAL_MAX_ROUNDS,
   shouldStartNewTurn,
   skipQueueHead,
   timeoutForRole,
@@ -119,7 +122,8 @@ describe('newSequentialTurn', () => {
     expect(state.leadName).toBe('Lead');
     expect(state.currentName).toBe('Lead');
     expect(state.currentRole).toBe('lead');
-    expect(state.deadline).toBe(1000 + 90_000); // default lead timeout
+    expect(state.deadline).toBe(1000 + FIRST_RESPONSE_GRACE_MS); // first-response grace
+    expect(state.hardDeadline).toBe(1000 + TURN_HARD_CAP_MS); // turn hard cap
     expect(state.leadGraceUntil).toBe(1000 + 20_000); // default lead grace
     expect(state.queue).toEqual([
       { name: 'A', client: 'cc', role: 'supplement' },
@@ -142,24 +146,34 @@ describe('advanceTurn', () => {
     const start = newSequentialTurn(r, 100, 1000)!;
     const after = advanceTurn(start, 'replied', r, 2000);
     expect(after.spoken).toEqual([
-      { name: 'Lead', client: 'cc', role: 'lead', status: 'replied', at: 2000 },
+      { name: 'Lead', client: 'cc', role: 'lead', status: 'replied', at: 2000, round: 1 },
     ]);
     expect(after.currentName).toBe('A');
     expect(after.currentRole).toBe('supplement');
-    expect(after.deadline).toBe(2000 + 45_000); // default supplement timeout
+    expect(after.deadline).toBe(2000 + FIRST_RESPONSE_GRACE_MS); // first-response grace
+    expect(after.hardDeadline).toBe(2000 + TURN_HARD_CAP_MS); // turn hard cap
     expect(after.queue).toEqual([{ name: 'B', client: 'cc', role: 'supplement' }]);
     // Grace window cleared once we leave the lead slot.
     expect(after.leadGraceUntil).toBeUndefined();
   });
 
-  it('clears current/deadline when the queue empties', () => {
+  it('starts the next round-robin round when the queue empties and the round replied', () => {
     const r = room({ participants: [part('host', 'web', 0), part('Lead', 'cc', 10)] });
     const start = newSequentialTurn(r, 100, 1000)!;
     expect(start.queue).toEqual([]);
+    expect(start.round).toBe(1);
+    // Lead (the only agent) replies → queue empty → round 1 had a reply →
+    // a fresh round 2 starts with the Lead taking the floor again.
     const after = advanceTurn(start, 'replied', r, 2000);
-    expect(after.currentName).toBeUndefined();
-    expect(after.deadline).toBeUndefined();
-    expect(after.spoken).toHaveLength(1);
+    expect(after.currentName).toBe('Lead');
+    expect(after.currentRole).toBe('lead');
+    expect(after.round).toBe(2);
+    expect(after.deadline).toBe(2000 + FIRST_RESPONSE_GRACE_MS); // fresh first-response grace
+    expect(after.hardDeadline).toBe(2000 + TURN_HARD_CAP_MS); // fresh turn hard cap
+    expect(after.queue).toEqual([]);
+    expect(after.spoken).toEqual([
+      { name: 'Lead', client: 'cc', role: 'lead', status: 'replied', at: 2000, round: 1 },
+    ]);
   });
 
   it('honors `no_addition` as a status without otherwise differing from `replied`', () => {
@@ -169,9 +183,139 @@ describe('advanceTurn', () => {
     const second = advanceTurn(start, 'replied', r, 2000);
     const third = advanceTurn(second, 'no_addition', r, 3000);
     expect(third.spoken[1]).toEqual({
-      name: 'A', client: 'cc', role: 'supplement', status: 'no_addition', at: 3000,
+      name: 'A', client: 'cc', role: 'supplement', status: 'no_addition', at: 3000, round: 1,
     });
     expect(third.currentName).toBe('B');
+  });
+});
+
+describe('sequential round-robin', () => {
+  it('starts a new round after every agent has spoken once', () => {
+    const r = room(); // host, Lead, A, B
+    let state = newSequentialTurn(r, 1, 1000)!;
+    expect(state.round).toBe(1);
+    state = advanceTurn(state, 'replied', r, 2000); // A current
+    expect(state.currentName).toBe('A');
+    state = advanceTurn(state, 'replied', r, 3000); // B current
+    expect(state.currentName).toBe('B');
+    state = advanceTurn(state, 'replied', r, 4000); // queue empty → round 2
+    expect(state.currentName).toBe('Lead');
+    expect(state.currentClient).toBe('cc');
+    expect(state.currentRole).toBe('lead');
+    expect(state.round).toBe(2);
+    expect(state.deadline).toBe(4000 + FIRST_RESPONSE_GRACE_MS); // fresh first-response grace
+    expect(state.queue).toEqual([
+      { name: 'A', client: 'cc', role: 'supplement' },
+      { name: 'B', client: 'cc', role: 'supplement' },
+    ]);
+  });
+
+  it('ends the turn when a round produces no new replies (converged)', () => {
+    const r = room(); // host, Lead, A, B
+    let state = newSequentialTurn(r, 1, 1000)!;
+    // Round 1: everyone contributes.
+    state = advanceTurn(state, 'replied', r, 2000); // A
+    state = advanceTurn(state, 'replied', r, 3000); // B
+    state = advanceTurn(state, 'replied', r, 4000); // → round 2
+    expect(state.round).toBe(2);
+    // Round 2: nobody adds anything → converged → turn ends.
+    state = advanceTurn(state, 'no_addition', r, 5000); // A
+    state = advanceTurn(state, 'no_addition', r, 6000); // B
+    const ended = advanceTurn(state, 'no_addition', r, 7000); // round 2 done, 0 replies
+    expect(ended.currentName).toBeUndefined();
+    expect(ended.currentRole).toBeUndefined();
+    expect(ended.deadline).toBeUndefined();
+    expect(ended.round).toBe(2);
+  });
+
+  it('ends the turn after SEQUENTIAL_MAX_ROUNDS even if agents keep replying', () => {
+    const r = room({ participants: [part('host', 'web', 0), part('Lead', 'cc', 10)] });
+    let state = newSequentialTurn(r, 1, 1000)!;
+    // One agent that always replies would loop forever without the cap.
+    for (let i = 0; i < 200 && state.currentName; i++) {
+      state = advanceTurn(state, 'replied', r, 2000 + i * 1000);
+    }
+    expect(state.currentName).toBeUndefined();
+    expect(state.round).toBe(SEQUENTIAL_MAX_ROUNDS);
+  });
+
+  it('the next round opens with a fresh deadline — not instantly skipped', () => {
+    const r = room({ participants: [part('host', 'web', 0), part('Lead', 'cc', 10)] });
+    const start = newSequentialTurn(r, 1, 1000)!;
+    const round2 = advanceTurn(start, 'replied', r, 2000); // queue empty → round 2
+    expect(round2.round).toBe(2);
+    const { state, skipped } = advanceOnTimeout(round2, r, 3000); // 3000 < deadline
+    expect(skipped).toEqual([]);
+    expect(state?.currentName).toBe('Lead');
+    expect(state?.round).toBe(2);
+  });
+
+  it('ends the turn when no cc agents remain for the next round', () => {
+    const r = room(); // host, Lead, A, B
+    let state = newSequentialTurn(r, 1, 1000)!;
+    state = advanceTurn(state, 'replied', r, 2000); // A current
+    state = advanceTurn(state, 'replied', r, 3000); // B current
+    // Every agent has left by the time round 2 would start.
+    const rNoAgents = room({ participants: [part('host', 'web', 0)] });
+    const ended = advanceTurn(state, 'replied', rNoAgents, 4000);
+    expect(ended.currentName).toBeUndefined();
+    expect(ended.currentRole).toBeUndefined();
+    expect(ended.deadline).toBeUndefined();
+  });
+
+  it('moderator mode: advanceTurn on an empty queue clears', () => {
+    const r = room({
+      replyMode: 'moderator',
+      modeConfig: { moderatorAgentName: 'Lead', moderatorAgentClient: 'cc' },
+    });
+    const start = newModeratorTurn(r, 1, 1000)!;
+    expect(start.queue).toEqual([]);
+    const after = advanceTurn(start, 'skipped', r, 2000);
+    expect(after.currentName).toBeUndefined();
+    expect(after.currentRole).toBeUndefined();
+  });
+});
+
+describe('renewTurnDeadline', () => {
+  it('pushes a sequential current speaker deadline out by the renewal window', () => {
+    const r = room();
+    const start = newSequentialTurn(r, 1, 1000)!; // deadline 61_000, hardDeadline 601_000
+    // Heartbeat at t=30_000 → deadline = min(30_000 + 300_000, 601_000).
+    const renewed = renewTurnDeadline(start, 30_000);
+    expect(renewed.deadline).toBe(330_000);
+    expect(renewed.hardDeadline).toBe(601_000); // ceiling never moves
+  });
+
+  it('caps the renewed deadline at hardDeadline', () => {
+    const r = room();
+    const start = newSequentialTurn(r, 1, 1000)!; // hardDeadline 601_000
+    // Late heartbeat: 500_000 + 300_000 = 800_000 > hardDeadline → capped.
+    const renewed = renewTurnDeadline(start, 500_000);
+    expect(renewed.deadline).toBe(601_000);
+  });
+
+  it('keeps the later deadline — a heartbeat never shortens a turn', () => {
+    const state: TurnState = {
+      turnId: 1, mode: 'sequential',
+      currentName: 'Lead', currentClient: 'cc', currentRole: 'lead',
+      deadline: 500_000, hardDeadline: 600_000, queue: [], spoken: [],
+    };
+    // now=0 → renewed = min(300_000, 600_000) = 300_000, which is < 500_000.
+    expect(renewTurnDeadline(state, 0).deadline).toBe(500_000);
+  });
+
+  it('is a no-op for moderator mode', () => {
+    const r = room({
+      replyMode: 'moderator',
+      modeConfig: { moderatorAgentName: 'Lead', moderatorAgentClient: 'cc' },
+    });
+    const start = newModeratorTurn(r, 1, 1000)!;
+    expect(renewTurnDeadline(start, 30_000)).toBe(start);
+  });
+
+  it('is a no-op when there is no current speaker', () => {
+    const ended: TurnState = { turnId: 1, mode: 'sequential', queue: [], spoken: [] };
+    expect(renewTurnDeadline(ended, 30_000)).toBe(ended);
   });
 });
 
@@ -184,10 +328,8 @@ describe('advanceOnTimeout', () => {
     expect(skipped).toEqual([]);
   });
 
-  it('cascades multiple timeouts in one call when deadlines are stacked', () => {
+  it('skips the expired speaker and gives the successor a fresh first-response window', () => {
     const r = room();
-    // Manually craft a state with two consecutive zero-timeout entries to
-    // force a cascade — easier than waiting for real time elapses.
     const stacked: TurnState = {
       turnId: 1,
       mode: 'sequential',
@@ -197,21 +339,24 @@ describe('advanceOnTimeout', () => {
       currentClient: 'cc',
       currentRole: 'lead',
       deadline: 100, // already passed at now=1000
+      hardDeadline: 600_100,
       queue: [
         { name: 'A', client: 'cc', role: 'supplement' },
         { name: 'B', client: 'cc', role: 'supplement' },
       ],
       spoken: [],
     };
-    const r2 = room({
-      modeConfig: { timeoutMs: { lead: 0, supplement: 0 } },
-    });
-    // Set the modeConfig timeouts to 0 so advanceTurn re-deadlines to `now`,
-    // which is also already passed → cascade continues.
-    const { state, skipped } = advanceOnTimeout(stacked, r2, 1000);
-    expect(skipped.map(s => s.name)).toEqual(['Lead', 'A', 'B']);
-    expect(state?.currentName).toBeUndefined();
-    expect(state?.spoken).toHaveLength(3);
+    // Only the Lead is skipped. The next speaker (A) becomes current with a
+    // fresh 60s first-response window measured from `now`, so the cascade
+    // stops there — speakers are never retroactively skipped for time that
+    // passed before they actually had the floor.
+    const { state, skipped } = advanceOnTimeout(stacked, r, 1000);
+    expect(skipped.map(s => s.name)).toEqual(['Lead']);
+    expect(skipped[0]?.status).toBe('timed_out');
+    expect(state?.currentName).toBe('A');
+    expect(state?.deadline).toBe(1000 + FIRST_RESPONSE_GRACE_MS);
+    expect(state?.hardDeadline).toBe(1000 + TURN_HARD_CAP_MS);
+    expect(state?.spoken).toHaveLength(1);
   });
 });
 
@@ -285,18 +430,20 @@ describe('consumeHostDirected', () => {
 describe('timeoutForRole', () => {
   it('returns the default for unconfigured roles', () => {
     const r = room();
-    expect(timeoutForRole(r, 'lead')).toBe(90_000);
-    expect(timeoutForRole(r, 'supplement')).toBe(45_000);
-    expect(timeoutForRole(r, 'moderator')).toBe(300_000);
-    expect(timeoutForRole(r, 'assignee')).toBe(90_000);
+    expect(timeoutForRole(r, 'lead')).toBe(600_000);
+    expect(timeoutForRole(r, 'supplement')).toBe(600_000);
+    expect(timeoutForRole(r, 'wrap')).toBe(600_000);
+    expect(timeoutForRole(r, 'moderator')).toBe(600_000);
+    expect(timeoutForRole(r, 'assignee')).toBe(600_000);
   });
 
   it('honors modeConfig.timeoutMs overrides', () => {
-    const r = room({ modeConfig: { timeoutMs: { lead: 5_000, supplement: 1_000 } } });
+    const r = room({ modeConfig: { timeoutMs: { lead: 5_000, supplement: 1_000, wrap: 2_000 } } });
     expect(timeoutForRole(r, 'lead')).toBe(5_000);
     expect(timeoutForRole(r, 'supplement')).toBe(1_000);
+    expect(timeoutForRole(r, 'wrap')).toBe(2_000);
     // Unconfigured roles still fall back.
-    expect(timeoutForRole(r, 'moderator')).toBe(300_000);
+    expect(timeoutForRole(r, 'moderator')).toBe(600_000);
   });
 
   it('returns Infinity for non-deadline roles (open, human, host_directed)', () => {
@@ -344,7 +491,7 @@ describe('newModeratorTurn', () => {
     expect(state.currentName).toBe('Lead');
     expect(state.currentRole).toBe('moderator');
     expect(state.queue).toEqual([]);
-    expect(state.deadline).toBe(1000 + 300_000); // default moderator timeout
+    expect(state.deadline).toBe(1000 + 600_000); // default moderator timeout
   });
 });
 
@@ -358,7 +505,7 @@ describe('moderatorReply', () => {
     const after = moderatorReply(start, r, 5000);
     expect(after.currentName).toBe('Lead');
     expect(after.currentRole).toBe('moderator');
-    expect(after.deadline).toBe(5000 + 300_000);
+    expect(after.deadline).toBe(5000 + 600_000);
     expect(after.spoken).toEqual([
       { name: 'Lead', client: 'cc', role: 'moderator', status: 'replied', at: 5000 },
     ]);
@@ -477,24 +624,28 @@ describe('lead grace', () => {
       state, 'A', 'cc', r, 25_000,
     );
     expect(leadSkipped).toEqual({
-      name: 'Lead', client: 'cc', role: 'lead', status: 'skipped_by_grace', at: 25_000,
+      name: 'Lead', client: 'cc', role: 'lead', status: 'skipped_by_grace', at: 25_000, round: 1,
     });
     expect(after.spoken).toEqual([
-      { name: 'Lead', client: 'cc', role: 'lead', status: 'skipped_by_grace', at: 25_000 },
-      { name: 'A', client: 'cc', role: 'supplement', status: 'replied', at: 25_000 },
+      { name: 'Lead', client: 'cc', role: 'lead', status: 'skipped_by_grace', at: 25_000, round: 1 },
+      { name: 'A', client: 'cc', role: 'supplement', status: 'replied', at: 25_000, round: 1 },
     ]);
     expect(after.currentName).toBe('B');
     expect(after.queue).toEqual([]);
     expect(after.leadGraceUntil).toBeUndefined();
   });
 
-  it('applyGraceSupplementReply clears current/deadline when queue empties out', () => {
+  it('starts the next round when the grace path drains the queue', () => {
     const r = room({ participants: [part('host', 'web', 0), part('Lead', 'cc', 10), part('A', 'cc', 20)] });
     const state = newSequentialTurn(r, 1, 1000)!;
     const { state: after } = applyGraceSupplementReply(state, 'A', 'cc', r, 25_000);
-    expect(after.currentName).toBeUndefined();
-    expect(after.queue).toEqual([]);
-    expect(after.leadGraceUntil).toBeUndefined();
+    // Queue drained via the grace path, round 1 had a reply (A) → round 2
+    // starts with the Lead taking the floor again.
+    expect(after.currentName).toBe('Lead');
+    expect(after.currentRole).toBe('lead');
+    expect(after.round).toBe(2);
+    expect(after.queue).toEqual([{ name: 'A', client: 'cc', role: 'supplement' }]);
+    expect(after.spoken).toHaveLength(2); // Lead skipped_by_grace + A replied
   });
 
   it('Lead reply during grace uses normal advanceTurn (no skip)', () => {
@@ -516,7 +667,7 @@ describe('lead grace', () => {
     expect(after.leadGraceUntil).toBe(state.leadGraceUntil);
     expect(after.queue).toEqual([{ name: 'B', client: 'cc', role: 'supplement' }]);
     expect(after.spoken).toEqual([
-      { name: 'A', client: 'cc', role: 'supplement', status: 'no_addition', at: 25_000 },
+      { name: 'A', client: 'cc', role: 'supplement', status: 'no_addition', at: 25_000, round: 1 },
     ]);
   });
 

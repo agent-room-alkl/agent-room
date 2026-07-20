@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeEscapedWhitespace } from '../src/text.js';
+import { normalizeEscapedWhitespace , isNearDuplicate, trigramSimilarity , isNearDuplicate, trigramSimilarity } from '../src/text.js';
 
 describe('normalizeEscapedWhitespace', () => {
   it('returns plain single-line text untouched', () => {
@@ -53,5 +53,44 @@ describe('normalizeEscapedWhitespace', () => {
     // through (e.g. a future schema migration).
     expect(normalizeEscapedWhitespace(undefined as unknown as string)).toBe(undefined);
     expect(normalizeEscapedWhitespace(null as unknown as string)).toBe(null);
+  });
+});
+
+describe('isNearDuplicate (anti-parrot guard)', () => {
+  const leadEn =
+    'The pricing strategy should anchor on the $4.50 quiche as a loss leader, raise the muffin line to $3.25, ' +
+    'and introduce a $12 brunch bundle to lift average ticket size. The biggest risk is cannibalizing the croissant SKU.';
+  const leadZh =
+    '定价策略应该以4.50美元的乳蛋饼作为引流款，把松饼线提价到3.25美元，并推出12美元的早午餐套餐来提升客单价。' +
+    '最大的风险是蚕食可颂这个单品的销量，需要在两周后复盘实际数据再做调整。';
+
+  it('flags a near-verbatim restatement (English)', () => {
+    const parrot =
+      'The pricing strategy should anchor on the $4.50 quiche as a loss leader, raise the muffin line to $3.25, ' +
+      'and introduce a $12 brunch bundle to lift the average ticket. The main risk is cannibalizing the croissant SKU.';
+    expect(isNearDuplicate(parrot, leadEn)).toBe(true);
+  });
+
+  it('flags a near-verbatim restatement (Chinese, no word spaces)', () => {
+    const parrot =
+      '定价策略应该以4.50美元的乳蛋饼作为引流款，把松饼线提价到3.25美元，并推出12美元的早午餐套餐提升客单价。' +
+      '最大的风险是蚕食可颂单品的销量，建议两周后复盘实际数据再调整。';
+    expect(isNearDuplicate(parrot, leadZh)).toBe(true);
+  });
+
+  it('passes a genuine delta on the same topic', () => {
+    const delta =
+      'One gap: weekend traffic skews 70% takeaway, so the $12 bundle needs a to-go format or it underperforms. ' +
+      'Also the quiche margin at $4.50 is negative once packaging is included — verify COGS before anchoring on it.';
+    expect(isNearDuplicate(delta, leadEn)).toBe(false);
+  });
+
+  it('never flags short replies (brevity is not parroting)', () => {
+    expect(isNearDuplicate('同意，按方案B执行。', '同意，按方案B执行。')).toBe(false);
+  });
+
+  it('trigramSimilarity is 1 for identical text and ~0 for unrelated text', () => {
+    expect(trigramSimilarity(leadEn, leadEn)).toBe(1);
+    expect(trigramSimilarity(leadEn, 'completely unrelated content about kubernetes ingress controllers')).toBeLessThan(0.1);
   });
 });

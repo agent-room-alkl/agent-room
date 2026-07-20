@@ -67,9 +67,10 @@ export async function ensureRulesSection(path: string): Promise<{ changed: boole
   return { changed: true };
 }
 
-async function readJson(path: string): Promise<Record<string, unknown> | null> {
+export async function readJson(path: string): Promise<Record<string, unknown> | null> {
   try {
     const text = await fs.readFile(path, 'utf8');
+    if (text.trim() === '') return null;
     return JSON.parse(text) as Record<string, unknown>;
   } catch (e: unknown) {
     if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') return null;
@@ -100,14 +101,17 @@ interface InstallResult {
   unchanged: string[];
 }
 
-export type InstallTarget = 'claude' | 'cursor' | 'codex' | 'gemini';
+export type InstallTarget = 'claude' | 'cursor' | 'codex' | 'antigravity';
 
 function which(cmd: string): Promise<string | null> {
   return new Promise((resolve) => {
-    const p = spawn('which', [cmd], { stdio: ['ignore', 'pipe', 'ignore'] });
+    const p = spawn(process.platform === 'win32' ? 'where' : 'which', [cmd], { stdio: ['ignore', 'pipe', 'ignore'] });
     let out = '';
     p.stdout.on('data', (d) => { out += d.toString(); });
-    p.on('close', (code) => resolve(code === 0 && out.trim() ? out.trim() : null));
+    p.on('close', (code) => {
+      const first = out.trim().split(/\r?\n/)[0]?.trim();
+      resolve(code === 0 && first ? first : null);
+    });
     p.on('error', () => resolve(null));
   });
 }
@@ -121,15 +125,18 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-function tryClaudeMcpAdd(): Promise<boolean> {
+function tryClaudeMcpAdd(claudeBin: string): Promise<boolean> {
   // `claude mcp add --scope user agent-room -- npx -y agent-room-mcp`
   // Lets Claude Code's own CLI write the registration in whatever location
   // / format the installed version prefers. Falls back silently on error.
+  // On Windows with shell:true, pass the bare command name so paths with spaces
+  // (e.g. C:\Users\Robin Zhang\...\claude.cmd) are not split by the shell.
+  const command = process.platform === 'win32' ? 'claude' : claudeBin;
   return new Promise((resolve) => {
     const p = spawn(
-      'claude',
+      command,
       ['mcp', 'add', '--scope', 'user', 'agent-room', '--', 'npx', '-y', 'agent-room-mcp'],
-      { stdio: 'ignore' }
+      { stdio: 'ignore', shell: process.platform === 'win32' }
     );
     p.on('close', (code) => resolve(code === 0));
     p.on('error', () => resolve(false));
@@ -145,15 +152,16 @@ async function installClaudeCode(opts: { hooks: boolean }): Promise<InstallResul
   const claudeBin = await which('claude');
   let registeredViaCli = false;
   if (claudeBin) {
-    registeredViaCli = await tryClaudeMcpAdd();
+    registeredViaCli = await tryClaudeMcpAdd(claudeBin);
     if (registeredViaCli) {
       result.changes.push(`registered agent-room via \`claude mcp add --scope user\``);
     }
   }
 
-  // Path 2 (always): write ~/.claude/.mcp.json as a fallback so Claude Code
-  // versions that read user-scope JSON directly still pick it up.
-  const mcpPath = join(homedir(), '.claude', '.mcp.json');
+  // Path 2 (always): write Claude Code's user-scope config fallback.
+  // Project-level .mcp.json does not cover arbitrary workspaces, and Claude
+  // Desktop reads a different global file, so keep this at user scope.
+  const mcpPath = join(homedir(), '.claude.json');
   const mcp = (await readJson(mcpPath)) ?? {};
   const servers = ((mcp.mcpServers as Record<string, unknown>) ?? {});
   const before = JSON.stringify(servers['agent-room']);
@@ -215,6 +223,12 @@ function claudeDesktopConfigPath(): string {
   return claudeDesktopConfigPathFor(homedir(), process.platform, process.env.APPDATA);
 }
 
+function printClaudeGlobalConfigNote(): void {
+  const desktopPath = claudeDesktopConfigPath();
+  const codePath = join(homedir(), '.claude.json');
+  console.log(`  Global MCP: ${desktopPath} + ${codePath}`);
+}
+
 interface DetectInstallTargetsOptions {
   env?: NodeJS.ProcessEnv;
   home?: string;
@@ -271,13 +285,23 @@ export async function detectInstallTargets(opts: DetectInstallTargetsOptions = {
     found.push('cursor');
   }
 
+  const antigravityConfigDir = join(home, '.gemini', 'config');
+  const antigravityApp =
+    platform === 'darwin' ? join('/Applications', 'Antigravity.app') :
+    platform === 'win32' ? join(env.LOCALAPPDATA ?? join(home, 'AppData', 'Local'), 'Antigravity') :
+    join(home, '.config', 'Antigravity');
   if (
-    Boolean(env.GEMINI_CLI) ||
-    Boolean(env.GOOGLE_GEMINI_CLI) ||
-    (await whichCmd('gemini')) ||
-    (await exists(join(home, '.gemini')))
+    Boolean(env.ANTIGRAVITY) ||
+    Boolean(env.ANTIGRAVITY_CLI) ||
+    Boolean(env.GOOGLE_ANTIGRAVITY) ||
+    env.TERM_PROGRAM === 'Antigravity' ||
+    (await whichCmd('agy')) ||
+    (await whichCmd('antigravity')) ||
+    (await exists(antigravityConfigDir)) ||
+    (await exists(join(home, '.gemini', 'antigravity'))) ||
+    (await exists(antigravityApp))
   ) {
-    found.push('gemini');
+    found.push('antigravity');
   }
 
   return found;
@@ -285,7 +309,7 @@ export async function detectInstallTargets(opts: DetectInstallTargetsOptions = {
 
 // Unified Claude installer. Writes both the Claude Desktop app's MCP config
 // (~/Library/Application Support/Claude/claude_desktop_config.json on macOS)
-// AND the Claude Code config files (~/.claude/.mcp.json + ~/.claude/settings.json
+// AND the Claude Code config files (~/.claude.json + ~/.claude/settings.json
 // for hooks, plus ~/.claude/CLAUDE.md for the join rule).
 //
 // Why one installer covers both: Anthropic's "Download Claude" page now ships
@@ -319,6 +343,8 @@ async function installClaude(opts: { hooks: boolean }): Promise<InstallResult> {
   const codeResult = await installClaudeCode({ hooks: opts.hooks });
   result.changes.push(...codeResult.changes);
   result.unchanged.push(...codeResult.unchanged);
+
+  printClaudeGlobalConfigNote();
 
   return result;
 }
@@ -372,21 +398,22 @@ async function installCursor(opts: { hooks: boolean }): Promise<InstallResult> {
   return result;
 }
 
-// Gemini CLI uses ~/.gemini/settings.json with the same `mcpServers` shape
-// as Claude Code / Cursor / Claude Desktop. Other settings in the file
-// (theme, auth, etc.) are preserved.
-const GEMINI_MCP_ENTRY = {
+// Antigravity uses a global MCP config at ~/.gemini/config/mcp_config.json.
+// Google also documents a workspace-local .agents/mcp_config.json, but Agent
+// Room installs globally by default so every room/project can use the same
+// MCP server and Windows users do not have to repeat setup per repository.
+const ANTIGRAVITY_MCP_ENTRY = {
   ...MCP_ENTRY,
-  env: { GEMINI_CLI: '1' },
+  env: { ANTIGRAVITY_CLI: '1' },
 };
 
-async function installGemini(): Promise<InstallResult> {
+async function installAntigravity(): Promise<InstallResult> {
   const result: InstallResult = { changes: [], unchanged: [] };
-  const path = join(homedir(), '.gemini', 'settings.json');
+  const path = join(homedir(), '.gemini', 'config', 'mcp_config.json');
   const data = (await readJson(path)) ?? {};
   const servers = ((data.mcpServers as Record<string, unknown>) ?? {});
   const before = JSON.stringify(servers['agent-room']);
-  servers['agent-room'] = GEMINI_MCP_ENTRY;
+  servers['agent-room'] = ANTIGRAVITY_MCP_ENTRY;
   data.mcpServers = servers;
   if (JSON.stringify(servers['agent-room']) !== before) {
     await writeJsonAtomic(path, data);
@@ -395,9 +422,8 @@ async function installGemini(): Promise<InstallResult> {
     result.unchanged.push(`${path} (already configured)`);
   }
 
-  // Gemini CLI loads ~/.gemini/GEMINI.md as global instruction memory. The
-  // MCP config alone gives Gemini the tool, but this rule is what makes a
-  // pasted Agent Room URL reliably trigger room_join instead of prose.
+  // Antigravity still reads ~/.gemini/GEMINI.md for global developer context
+  // (per Google's Gemini CLI → Antigravity migration guide).
   const rulesPath = join(homedir(), '.gemini', 'GEMINI.md');
   const rulesRes = await ensureRulesSection(rulesPath);
   if (rulesRes.changed) {
@@ -512,14 +538,7 @@ async function installCodex(opts: { hooks: boolean }): Promise<InstallResult> {
  * place themselves. Keeps install transparent — no surprise files.
  */
 function printRulesInstruction(target: string, where: string): void {
-  console.log(`\n  Manual rules step for ${target}:`);
-  console.log(`    Paste the following into ${where}:`);
-  console.log('    ' + '-'.repeat(60));
-  for (const line of (RULES_MARKER_BEGIN + '\n\n' + RULES_TEXT + '\n' + RULES_MARKER_END).split('\n')) {
-    console.log('    ' + line);
-  }
-  console.log('    ' + '-'.repeat(60));
-  console.log('  This makes the agent auto-join when you say "join the room <code>" or paste an agent-room URL,\n  without needing to spell out the tool call each time.\n');
+  console.log(`${target}: add the Agent Room auto-join rule to ${where}`);
 }
 
 function printConfigs() {
@@ -534,9 +553,9 @@ function printConfigs() {
   // bundles Chat + Claude Cowork + Claude Code, so we list both config files
   // under one heading — same product, two write paths.
   console.log('\n--- Claude Code ---');
-  console.log('~/.claude/.mcp.json (Claude Code CLI):');
+  console.log('~/.claude.json (Claude Code CLI — global user scope, not project .mcp.json):');
   console.log(mcp);
-  console.log('\nclaude_desktop_config.json (Claude desktop app):');
+  console.log(`\n${claudeDesktopConfigPath()} (Claude desktop app — global, macOS/Windows/Linux):`);
   console.log(mcp);
   console.log('\n~/.claude/settings.json (autonomous-chat hooks — used by both surfaces):');
   console.log(hooks);
@@ -554,8 +573,8 @@ function printConfigs() {
   console.log('~/.codeium/windsurf/mcp_config.json (or equivalent):');
   console.log(mcp);
 
-  console.log('\n--- Gemini CLI ---');
-  console.log('~/.gemini/settings.json:');
+  console.log('\n--- Google Antigravity ---');
+  console.log('~/.gemini/config/mcp_config.json (global config; preferred over per-project .agents/mcp_config.json):');
   console.log(mcp);
 
   console.log('\n--- Cline (VS Code extension) ---');
@@ -582,19 +601,18 @@ function printConfigs() {
 }
 
 function reportResult(target: string, result: InstallResult) {
-  if (result.changes.length === 0 && result.unchanged.length === 0) return;
-  console.log(`\nagent-room → ${target}`);
+  if (result.changes.length === 0) {
+    if (result.unchanged.length > 0) {
+      console.log(`${target}: already configured`);
+    }
+    return;
+  }
+  console.log(`${target}:`);
   for (const line of result.changes) console.log(`  ✓ ${line}`);
-  for (const line of result.unchanged) console.log(`  = ${line}`);
 }
 
 function nextSteps(target: string) {
-  console.log('\nNext:');
-  console.log(`  1. Restart ${target} so it picks up the new MCP config.`);
-  console.log('  2. Tell your agent: "create an agent-room about <topic>"');
-  console.log('     or:               "join agent-room <CODE>"');
-  console.log('  3. Web view of any room: https://www.agent-room.com/r/<CODE>');
-  console.log('');
+  console.log(`Restart ${target}, then: join agent-room <CODE>`);
 }
 
 function targetLabel(target: InstallTarget): string {
@@ -602,7 +620,7 @@ function targetLabel(target: InstallTarget): string {
     target === 'claude' ? 'Claude' :
     target === 'cursor' ? 'Cursor' :
     target === 'codex' ? 'Codex' :
-    'Gemini CLI'
+    'Antigravity'
   );
 }
 
@@ -610,18 +628,12 @@ async function installTarget(target: InstallTarget, opts: { hooks: boolean }): P
   if (target === 'claude') {
     const result = await installClaude({ hooks: opts.hooks });
     reportResult('Claude', result);
-    if (!opts.hooks) {
-      console.log('  (skipped hooks; pass without --no-hooks for autonomous chat)');
-    }
     return;
   }
 
   if (target === 'cursor') {
     const result = await installCursor({ hooks: opts.hooks });
     reportResult('Cursor', result);
-    if (!opts.hooks) {
-      console.log('  (skipped hooks; pass without --no-hooks for autonomous chat — Cursor 1.7+ required)');
-    }
     printRulesInstruction('Cursor', 'Cursor → Settings → Rules → User Rules');
     return;
   }
@@ -629,24 +641,15 @@ async function installTarget(target: InstallTarget, opts: { hooks: boolean }): P
   if (target === 'codex') {
     const result = await installCodex({ hooks: opts.hooks });
     reportResult('Codex', result);
-    if (!opts.hooks) {
-      console.log('  (skipped hooks; pass without --no-hooks for autonomous chat)');
-    }
     return;
   }
 
-  const result = await installGemini();
-  reportResult('Gemini CLI', result);
-  console.log('  Note: Gemini CLI does not currently support Claude Code-style hooks, so ask it to call room_listen explicitly to stay present in the room.');
+  const result = await installAntigravity();
+  reportResult('Antigravity', result);
 }
 
 async function installDetectedTargets(targets: InstallTarget[], opts: { hooks: boolean }): Promise<void> {
-  console.log('\nAgent Room — install MCP server\n');
-  console.log('Detected clients:');
-  for (const target of targets) {
-    console.log(`  ✓ ${targetLabel(target)}`);
-  }
-  console.log('\nInstalling for all detected clients...');
+  console.log(`Installing agent-room for: ${targets.map(targetLabel).join(', ')}`);
 
   for (const target of targets) {
     await installTarget(target, opts);
@@ -683,14 +686,14 @@ export async function runInit(argv: string[]): Promise<void> {
     console.log('  1. Claude        (default — covers Claude Code CLI and the Claude desktop app; adds MCP server + autonomous-chat hooks)');
     console.log('  2. Cursor        (Cursor 1.7+: adds MCP server + stop hook)');
     console.log('  3. Codex         (covers CLI, IDE extension, and the Codex desktop app; adds MCP server + hooks)');
-    console.log('  4. Gemini CLI');
+    console.log('  4. Antigravity');
     console.log('  5. Print configs (paste them yourself)');
     const ans = (await rl.question('\n[1]: ')).trim();
     rl.close();
     target =
       ans === '2' ? 'cursor' :
       ans === '3' ? 'codex' :
-      ans === '4' ? 'gemini' :
+      ans === '4' ? 'antigravity' :
       ans === '5' ? 'print' :
       'claude-code';
   }
@@ -706,9 +709,9 @@ export async function runInit(argv: string[]): Promise<void> {
     return;
   }
 
-  if (target === 'gemini' || target === 'gemini-cli') {
-    await installTarget('gemini', { hooks: !noHooks });
-    nextSteps('Gemini CLI');
+  if (target === 'antigravity' || target === 'antigravity-cli' || target === 'gemini' || target === 'gemini-cli') {
+    await installTarget('antigravity', { hooks: !noHooks });
+    nextSteps('Antigravity');
     return;
   }
 
@@ -746,6 +749,6 @@ export async function runInit(argv: string[]): Promise<void> {
     return;
   }
 
-  console.error(`Unknown target: ${target}. Try: claude, cursor, codex, gemini, print`);
+  console.error(`Unknown target: ${target}. Try: claude, cursor, codex, antigravity, print`);
   process.exit(1);
 }

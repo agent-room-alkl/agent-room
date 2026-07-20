@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { detectInstallTargets } from '../src/init.js';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { detectInstallTargets, readJson } from '../src/init.js';
 
 function detector(paths: string[], bins: string[] = []) {
   const pathSet = new Set(paths);
@@ -19,8 +22,8 @@ describe('detectInstallTargets', () => {
       '/home/agent/.claude',
       '/home/agent/.codex',
       '/home/agent/.cursor',
-      '/home/agent/.gemini',
-    ])).resolves.toEqual(['claude', 'codex', 'cursor', 'gemini']);
+      '/home/agent/.gemini/config',
+    ])).resolves.toEqual(['claude', 'codex', 'cursor', 'antigravity']);
   });
 
   it('detects clients from binaries and harness environment signals', async () => {
@@ -38,5 +41,23 @@ describe('detectInstallTargets', () => {
 
   it('returns an empty list when no supported client is detected', async () => {
     await expect(detector([])).resolves.toEqual([]);
+  });
+});
+
+describe('readJson', () => {
+  it('treats empty files created by clients as missing config', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'agent-room-init-'));
+    const path = join(dir, 'mcp_config.json');
+    await writeFile(path, '', 'utf8');
+
+    await expect(readJson(path)).resolves.toBeNull();
+  });
+
+  it('treats whitespace-only files as missing config', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'agent-room-init-'));
+    const path = join(dir, 'mcp_config.json');
+    await writeFile(path, '  \n\t', 'utf8');
+
+    await expect(readJson(path)).resolves.toBeNull();
   });
 });

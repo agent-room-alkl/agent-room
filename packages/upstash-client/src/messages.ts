@@ -15,6 +15,7 @@ import {
   moderatorReply,
   newModeratorTurn,
   newSequentialTurn,
+  renewTurnDeadline,
   shouldStartNewTurn,
   skipQueueHead,
 } from './turnState.js';
@@ -86,10 +87,15 @@ export interface AppendResult {
 //     them — server-side fields are merged in, server wins on conflict.
 //   - Supplement-skip token (`__no_addition__`) advances the turn WITHOUT
 //     appending a chat message; returns { appended: false, reason: 'no_addition' }.
+//   - `kind: 'status'` (from room_status) posts a status-tagged message that
+//     never advances the turn. In sequential mode, when the sender is the
+//     current speaker, it also renews their turn deadline (heartbeat) — a
+//     long-running agent can signal "still working" without losing the floor.
 export async function appendMessage(
   client: UpstashClient,
   code: string,
-  message: Message
+  message: Message,
+  kind: 'message' | 'status' = 'message',
 ): Promise<AppendResult> {
   const room = await getRoom(client, code);
   if (!findSpeaker(room, message.name, message.client)) {
@@ -97,17 +103,19 @@ export async function appendMessage(
   }
   const mode = room.replyMode ?? 'open';
 
-  // Fast path: open mode. No turn machinery — preserves the legacy hot
-  // path bit-for-bit so existing rooms see zero added latency.
-  if (mode === 'open') {
+  // Fast path: open mode — and the orchestrated modes (consensus / debate),
+  // which are driven entirely server-side by a multi-round runner rather than
+  // by the turn machinery. They post via appendDemoAgentMessage with no floor
+  // to wait for, exactly like open mode, so they take the same gating-free path.
+  if (mode === 'open' || mode === 'consensus' || mode === 'debate') {
     const metadata: MessageMetadata = {
       ...(message.metadata ?? {}),
-      modeAtSend: 'open',
+      modeAtSend: mode,
       roleAtSend: 'open',
       invocationType: message.metadata?.invocationType ?? 'normal_turn',
     };
     const enriched: Message = { ...message, metadata };
-    await rpushMessage(client, code, enriched);
+    await rpushMessage(client, code, enriched, room.createdAt);
     return { appended: true, metadata };
   }
 
@@ -124,6 +132,7 @@ export async function appendMessage(
     turnId?: number;
     skipMessage: boolean;
     leadSkipped?: TurnSpokenEntry;
+    extendsTurn?: boolean;
   } = {
     roleAtSend: 'open',
     invocationType: 'normal_turn',
@@ -132,8 +141,9 @@ export async function appendMessage(
 
   await casTurnState(client, code, (prev) => {
     // Reset per-attempt decision state so a CAS retry doesn't carry over
-    // leadSkipped from a stale earlier attempt.
+    // leadSkipped / extendsTurn from a stale earlier attempt.
     decision.leadSkipped = undefined;
+    decision.extendsTurn = false;
     // Lazy cleanup: skip any expired speakers before evaluating this
     // sender. Skipped sys messages are emitted by the listen poll, not
     // here — appendMessage is on the hot path and must not RPUSH a sys
@@ -174,6 +184,22 @@ export async function appendMessage(
       const isGrace = isGraceSupplementSpeaker(cur, message.name, message.client, now);
       const role: RoleInTurn = isGrace ? 'supplement' : cur.currentRole!;
       const turnId = cur.turnId;
+      // room_status heartbeat: a status ping is posted as a status-tagged
+      // message and never advances the turn. When the sender is the actual
+      // current speaker in sequential mode, it also renews their deadline
+      // (extendsTurn) — that is the "still working" heartbeat. A grace-
+      // eligible queue-head supplement, or a moderator, just posts a side
+      // note with no turn-state change.
+      if (kind === 'status') {
+        decision.roleAtSend = 'status';
+        decision.invocationType = 'status_update';
+        decision.turnId = turnId;
+        if (!isGrace && cur.mode === 'sequential') {
+          decision.extendsTurn = true;
+          return renewTurnDeadline(cur, now);
+        }
+        return cur;
+      }
       decision.roleAtSend = role;
       decision.invocationType = 'normal_turn';
       decision.turnId = turnId;
@@ -221,6 +247,23 @@ export async function appendMessage(
         return cur;
       }
     }
+    // Moderator mode: a non-moderator cc agent that is neither the current
+    // speaker nor a directly-invoked assignee may still post a *status
+    // update* — a short "received / on it / done" signal back to the
+    // Moderator. It is always allowed, never consumes the Moderator's
+    // floor, and does NOT mutate turn state (queue / current / deadline
+    // are untouched). Substantive analysis or challenge still requires a
+    // Moderator @-invoke — that flows through the consumeHostDirected path
+    // above. The message is appended normally, tagged roleAtSend='status'
+    // / invocationType='status_update' so the UI and reports can render it
+    // as a status ping rather than a turn reply.
+    if (mode === 'moderator') {
+      decision.roleAtSend = 'status';
+      decision.invocationType = 'status_update';
+      decision.turnId = cur?.turnId;
+      // Return turn state unchanged — a status update is a side channel.
+      return cur;
+    }
     throw new NotYourTurnError(message.name, mode);
   });
 
@@ -246,9 +289,10 @@ export async function appendMessage(
     roleAtSend: decision.roleAtSend,
     invocationType: decision.invocationType,
     ...(decision.turnId !== undefined ? { turnId: decision.turnId } : {}),
+    ...(decision.extendsTurn ? { extendsTurn: true } : {}),
   };
   const enriched: Message = { ...message, metadata };
-  await rpushMessage(client, code, enriched);
+  await rpushMessage(client, code, enriched, room.createdAt);
   return {
     appended: true,
     metadata,
@@ -256,18 +300,31 @@ export async function appendMessage(
   };
 }
 
-// Internal helper: write a message to the Redis list, refreshing TTL and
-// keeping the absolute-count counter in lockstep.
+// Internal helper: write a message to the Redis list, pinning TTL to the
+// room's hard 24h deadline and keeping the absolute-count counter in lockstep.
 // INCR on the count key MUST sit in the same pipeline as RPUSH so the count
 // stays in lock-step with the list — listMessages relies on the invariant
 // `totalCount - listLen = number of LTRIMmed entries` to compensate cursors.
-async function rpushMessage(client: UpstashClient, code: string, message: Message): Promise<void> {
+// EXPIREAT (a fixed creation+TTL deadline) rather than EXPIRE means the
+// message list dies exactly when the room does, instead of sliding forward.
+async function rpushMessage(
+  client: UpstashClient,
+  code: string,
+  message: Message,
+  roomCreatedAt: number,
+): Promise<void> {
+  const expireAt = (Number.isFinite(roomCreatedAt) ? Math.floor(roomCreatedAt / 1000) : Math.floor(Date.now() / 1000)) + ROOM_TTL_SECONDS;
+  // Older MCP clients (and raw API callers) can send a message with no
+  // `text` — persisting it verbatim crashed every web viewer of the room
+  // ("Cannot read properties of undefined (reading 'length')" in Bubble
+  // rendering). Coerce to '' at the single write choke point.
+  const safe = typeof message.text === 'string' ? message : { ...message, text: '' };
   await client.pipeline([
-    ['RPUSH', msgsKey(code), JSON.stringify(message)],
+    ['RPUSH', msgsKey(code), JSON.stringify(safe)],
     ['INCR', msgCountKey(code)],
     ['LTRIM', msgsKey(code), -MAX_MESSAGES_PER_ROOM, -1],
-    ['EXPIRE', msgsKey(code), ROOM_TTL_SECONDS],
-    ['EXPIRE', msgCountKey(code), ROOM_TTL_SECONDS],
+    ['EXPIREAT', msgsKey(code), expireAt],
+    ['EXPIREAT', msgCountKey(code), expireAt],
   ]);
 }
 
@@ -283,8 +340,8 @@ export async function appendSystemMessage(
   code: string,
   message: Message
 ): Promise<void> {
-  await getRoom(client, code); // throws RoomNotFoundError if the room is gone
-  await rpushMessage(client, code, message);
+  const room = await getRoom(client, code); // throws RoomNotFoundError if the room is gone
+  await rpushMessage(client, code, message, room.createdAt);
 }
 
 // Cursor semantics: `fromIndex` is the absolute count of messages the caller
@@ -331,5 +388,11 @@ export async function listMessages(
 
   if (start >= listLen) return [];
   const raw = await client.command<string[]>(['LRANGE', msgsKey(code), start, -1]);
-  return raw.map(line => JSON.parse(line) as Message);
+  return raw.map(line => {
+    const m = JSON.parse(line) as Message;
+    // Heal text-less messages already stored by older clients — without
+    // this, one bad message bricks the room page for every viewer.
+    if (typeof m.text !== 'string') m.text = '';
+    return m;
+  });
 }

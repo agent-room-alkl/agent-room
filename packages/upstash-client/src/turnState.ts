@@ -1,5 +1,12 @@
 import type { ClientKind, Participant, ReplyMode, RoleInTurn, Room } from '@agent-room/shared';
-import { DEFAULT_LEAD_GRACE_MS, DEFAULT_TURN_TIMEOUTS_MS, ROOM_TTL_SECONDS } from '@agent-room/shared';
+import {
+  DEFAULT_LEAD_GRACE_MS,
+  DEFAULT_TURN_TIMEOUTS_MS,
+  FIRST_RESPONSE_GRACE_MS,
+  ROOM_TTL_SECONDS,
+  TURN_HARD_CAP_MS,
+  TURN_RENEWAL_MS,
+} from '@agent-room/shared';
 import type { UpstashClient } from './client.js';
 import { ConcurrencyError } from './errors.js';
 import { casRoom } from './rooms.js';
@@ -36,6 +43,10 @@ export interface TurnSpokenEntry {
   role: RoleInTurn;
   status: TurnSpokenStatus;
   at: number;
+  // Sequential round-robin: which round (1-based) this entry belongs to.
+  // Lets advanceRoundOrEnd tell whether the round just finished produced a
+  // reply. Undefined for moderator mode.
+  round?: number;
 }
 
 export interface TurnState {
@@ -64,7 +75,16 @@ export interface TurnState {
   currentRole?: RoleInTurn;
   // Epoch-ms by which currentName must produce a message. If Date.now()
   // exceeds this on the next read, advanceOnTimeout() skips and moves on.
+  // Sequential mode: starts as a short FIRST_RESPONSE_GRACE window and is
+  // pushed out by each room_status heartbeat (see renewTurnDeadline).
   deadline?: number;
+
+  // Sequential mode: absolute epoch-ms ceiling for the current speaker —
+  // set when they take the floor (= now + TURN_HARD_CAP_MS). room_status
+  // heartbeats renew `deadline` but never past this, so a single agent
+  // cannot hold a turn forever. Unset for moderator mode and once the
+  // turn has no current speaker.
+  hardDeadline?: number;
 
   // Sequential mode only: epoch-ms until which the Lead has the floor
   // exclusively. After this instant the queue-head supplement may also
@@ -76,6 +96,11 @@ export interface TurnState {
 
   // FIFO queue of upcoming speakers.
   queue: TurnQueueEntry[];
+
+  // Sequential round-robin: the current round number (1-based). Each round
+  // is one full pass through the room's cc agents. When the queue empties,
+  // advanceRoundOrEnd starts the next round or ends the turn.
+  round?: number;
 
   // History of who already spoke this turn and how.
   spoken: TurnSpokenEntry[];
@@ -110,6 +135,12 @@ function turnStateKey(code: string): string {
 }
 
 const CAS_MAX_ATTEMPTS = 3;
+
+// Sequential mode runs as a round-robin: every cc agent speaks once per
+// round, round after round, until a round produces no new content (everyone
+// has converged) — capped here so a discussion that never converges still
+// ends instead of looping forever.
+export const SEQUENTIAL_MAX_ROUNDS = 10;
 
 export async function getTurnState(client: UpstashClient, code: string): Promise<TurnState | null> {
   const raw = await client.command<string | null>(['GET', turnStateKey(code)]);
@@ -167,6 +198,28 @@ export function leadGraceMs(room: Room): number {
   return room.modeConfig?.leadGraceMs ?? DEFAULT_LEAD_GRACE_MS;
 }
 
+// Sequential mode: the deadline fields for an agent that has just become
+// the current speaker — a short first-response window plus the absolute
+// hard cap. room_status heartbeats renew `deadline` (see renewTurnDeadline)
+// up to `hardDeadline`, which can never be pushed.
+function freshSequentialDeadline(now: number): { deadline: number; hardDeadline: number } {
+  return { deadline: now + FIRST_RESPONSE_GRACE_MS, hardDeadline: now + TURN_HARD_CAP_MS };
+}
+
+// Sequential mode: a room_status heartbeat from the current speaker pushes
+// their working deadline out by TURN_RENEWAL_MS, capped at `hardDeadline`
+// so the whole turn can never exceed TURN_HARD_CAP_MS from when the agent
+// took the floor. No-op (returns the input) when the turn isn't sequential
+// or has no current speaker. The deadline never moves backwards — a late
+// ping can't shorten a turn.
+export function renewTurnDeadline(state: TurnState, now: number = Date.now()): TurnState {
+  if (state.mode !== 'sequential' || !state.currentName) return state;
+  const cap = state.hardDeadline ?? now + TURN_RENEWAL_MS;
+  const renewed = Math.min(now + TURN_RENEWAL_MS, cap);
+  const deadline = Math.max(state.deadline ?? 0, renewed);
+  return { ...state, deadline };
+}
+
 // Resolve the per-role timeout in ms for this room's modeConfig, falling
 // back to DEFAULT_TURN_TIMEOUTS_MS for any role the host didn't override.
 export function timeoutForRole(room: Room, role: RoleInTurn): number {
@@ -174,6 +227,7 @@ export function timeoutForRole(room: Room, role: RoleInTurn): number {
   switch (role) {
     case 'lead': return overrides.lead ?? DEFAULT_TURN_TIMEOUTS_MS.lead;
     case 'supplement': return overrides.supplement ?? DEFAULT_TURN_TIMEOUTS_MS.supplement;
+    case 'wrap': return overrides.wrap ?? DEFAULT_TURN_TIMEOUTS_MS.wrap;
     case 'moderator': return overrides.moderator ?? DEFAULT_TURN_TIMEOUTS_MS.moderator;
     case 'assignee': return overrides.assignee ?? DEFAULT_TURN_TIMEOUTS_MS.assignee;
     // 'open', 'human', 'host_directed' have no deadline — return a sentinel
@@ -275,19 +329,75 @@ export function newSequentialTurn(
     currentName: lead.name,
     currentClient: lead.client,
     currentRole: leadRole,
-    deadline: now + timeoutForRole(room, leadRole),
+    ...freshSequentialDeadline(now),
     // Lead-grace: queue-head supplement is unlocked after this instant
     // (only set if there's actually a supplement waiting — pointless
     // grace window if the Lead is the only agent).
     ...(queue.length > 0 ? { leadGraceUntil: now + leadGraceMs(room) } : {}),
     queue,
+    round: 1,
     spoken: [],
+  };
+}
+
+// Sequential turn drain. When the round's queue empties, decide whether the
+// round-robin discussion continues or ends:
+//   - if the round that just finished produced no substantive reply
+//     (every agent sent __no_addition__ or timed out) the agents have
+//     converged — the turn ends;
+//   - else if SEQUENTIAL_MAX_ROUNDS rounds have already run, end anyway
+//     (runaway guard for discussions that never converge);
+//   - otherwise a fresh round starts: the speaker order is re-seeded from
+//     the room's live cc agents (so agents who joined/left mid-discussion
+//     are picked up) and the Lead takes the floor again.
+//
+// `spoken` is the already-extended spoken log; its entries are tagged with
+// the round they belong to, so we can tell whether the finished round had
+// a reply. `now` anchors the next speaker's deadline.
+function advanceRoundOrEnd(
+  state: TurnState,
+  room: Room,
+  spoken: TurnSpokenEntry[],
+  now: number,
+): TurnState {
+  const ended: TurnState = {
+    ...state,
+    currentName: undefined,
+    currentClient: undefined,
+    currentRole: undefined,
+    deadline: undefined,
+    hardDeadline: undefined,
+    leadGraceUntil: undefined,
+    queue: [],
+    spoken,
+  };
+  if (state.mode !== 'sequential') return ended;
+  const round = state.round ?? 1;
+  const roundReplied = spoken.some(e => e.round === round && e.status === 'replied');
+  // Converged (nobody added anything this round) or hit the round cap.
+  if (!roundReplied || round >= SEQUENTIAL_MAX_ROUNDS) return ended;
+  // Start the next round, re-seeding the speaker order from the room.
+  const lead = pickLeadForSequential(room);
+  if (!lead) return ended;
+  const queue = buildSupplementQueue(room, lead);
+  return {
+    ...state,
+    round: round + 1,
+    currentName: lead.name,
+    currentClient: lead.client,
+    currentRole: 'lead',
+    ...freshSequentialDeadline(now),
+    leadGraceUntil: queue.length > 0 ? now + leadGraceMs(room) : undefined,
+    queue,
+    spoken,
   };
 }
 
 // Advance the turn after the current speaker has produced a message (or
 // been skipped). Pops the next queue entry into `current`, sets deadline.
-// If the queue is empty, clears current/deadline (turn complete; record is
+// If the queue is empty, sequential mode issues a one-shot Lead 'wrap'
+// turn (see endOrWrapSequential); once that wrap completes — or for
+// moderator mode — current/deadline are cleared (turn complete; record is
 // retained for `__no_addition__` lookback but accepts no more agents).
 //
 // `status` describes what the current speaker did:
@@ -311,27 +421,19 @@ export function advanceTurn(
     role: state.currentRole,
     status,
     at: now,
+    round: state.round,
   };
   const nextQueue = state.queue.slice();
   const next = nextQueue.shift();
   if (!next) {
-    return {
-      ...state,
-      currentName: undefined,
-      currentClient: undefined,
-      currentRole: undefined,
-      deadline: undefined,
-      leadGraceUntil: undefined,
-      queue: [],
-      spoken: [...state.spoken, finished],
-    };
+    return advanceRoundOrEnd(state, room, [...state.spoken, finished], now);
   }
   return {
     ...state,
     currentName: next.name,
     currentClient: next.client,
     currentRole: next.role,
-    deadline: now + timeoutForRole(room, next.role),
+    ...freshSequentialDeadline(now),
     // Grace only applies while a Lead is current. Once we hand off
     // (or skip past) the Lead, drop the field so dump-readers don't
     // see a stale value.
@@ -369,9 +471,12 @@ export function moderatorReply(
 // Lazy timeout check called from runRoomListenPoll and appendMessage. If
 // the current speaker's deadline has passed, skip them and advance. Returns
 // `[newState, skipped]` where `skipped` lists every speaker auto-skipped
-// in this call (callers emit one sys message per skip). May skip multiple
-// queued speakers in one call if their join-order successors are also past
-// their notional deadlines (handles the case where listen polls coalesced).
+// in this call (callers emit one sys message per skip). In practice this
+// skips at most one speaker per call: each successor takes the floor with a
+// fresh FIRST_RESPONSE_GRACE window measured from `now`, so a speaker is
+// never retroactively skipped for time that elapsed (e.g. coalesced listen
+// polls) before they actually held the turn. The cascade loop is kept for
+// safety but normally runs a single iteration.
 export function advanceOnTimeout(
   state: TurnState | null,
   room: Room,
@@ -390,6 +495,7 @@ export function advanceOnTimeout(
       role: cur.currentRole!,
       status: 'timed_out',
       at: now,
+      round: cur.round,
     };
     skipped.push(skip);
     cur = advanceTurn(cur, 'timed_out', room, now);
@@ -477,6 +583,7 @@ export function applyGraceSupplementReply(
     role: 'lead',
     status: 'skipped_by_grace',
     at: now,
+    round: state.round,
   };
   const supplementEntry: TurnSpokenEntry = {
     name: supplementName,
@@ -484,6 +591,7 @@ export function applyGraceSupplementReply(
     role: 'supplement',
     status: supplementStatus,
     at: now,
+    round: state.round,
   };
   // Drop the queue-head supplement (the one that just spoke), THEN
   // advance to the next speaker. Note: we deliberately drop the Lead
@@ -492,17 +600,10 @@ export function applyGraceSupplementReply(
   const next = remaining.shift();
   const spoken = [...state.spoken, leadSkipped, supplementEntry];
   if (!next) {
+    // Queue drained via the grace path — hand off to the round-robin drain,
+    // which starts the next round or ends the turn on convergence.
     return {
-      state: {
-        ...state,
-        currentName: undefined,
-        currentClient: undefined,
-        currentRole: undefined,
-        deadline: undefined,
-        leadGraceUntil: undefined,
-        queue: [],
-        spoken,
-      },
+      state: advanceRoundOrEnd(state, room, spoken, now),
       leadSkipped,
     };
   }
@@ -512,7 +613,7 @@ export function applyGraceSupplementReply(
       currentName: next.name,
       currentClient: next.client,
       currentRole: next.role,
-      deadline: now + timeoutForRole(room, next.role),
+      ...freshSequentialDeadline(now),
       leadGraceUntil: undefined,
       queue: remaining,
       spoken,
@@ -539,6 +640,7 @@ export function skipQueueHead(
     role: head.role,
     status,
     at: now,
+    round: state.round,
   };
   return {
     ...state,
@@ -648,9 +750,53 @@ export interface SweepResult {
   state: TurnState | null;
   skipped: TurnSpokenEntry[];
   // If the room's replyMode flipped to 'open' as a side effect of this
-  // sweep (e.g. moderator timed out), this carries the reason + the
-  // role that triggered it. The caller emits one sys event per fallback.
+  // sweep (e.g. moderator timed out AND no deputy was available), this
+  // carries the reason + the role that triggered it. The caller emits one
+  // sys event per fallback.
   fallback?: { reason: FallbackReason; agentName: string; agentClient: ClientKind };
+  // If a dead-ended moderator was instead handed off to a deputy moderator
+  // (the room stays in 'moderator' mode), this carries who lost the floor
+  // and who took it. The caller emits a sys event and — when the deputy is a
+  // hosted agent — wakes them so they actually run.
+  handoff?: { reason: FallbackReason; fromName: string; fromClient: ClientKind; toName: string; toClient: ClientKind };
+}
+
+// Pick a deputy to take the moderator floor when the configured moderator
+// dead-ends (times out or leaves). The deputy is the earliest-joined OTHER cc
+// agent that can still speak — humans never moderate, and the outgoing
+// moderator is excluded. Returns undefined when nobody else can take over, in
+// which case the caller falls the room back to 'open' as before.
+export function pickDeputyModerator(
+  room: Room,
+  exclude: { name: string; client: ClientKind },
+): Participant | undefined {
+  return room.participants
+    .filter(p =>
+      p.client === 'cc'
+      && p.canSpeak !== false
+      && !(p.name === exclude.name && p.client === exclude.client),
+    )
+    .sort((a, b) => a.joinedAt - b.joinedAt)[0];
+}
+
+// Idempotency claim for a dead-end transition (moderator timed out / left, or
+// sequential Lead left). Concurrent sweeps that observe the SAME dead-end must
+// only emit ONE skip + handoff/fallback notice; without this, two coalesced
+// listen polls each post the notice, which surfaced in prod as duplicate
+// "skipping … slot" + "handing the floor"/"falling back to open" spam. The
+// `identity` is derived purely from `prev` (the absent role + the deadline that
+// lapsed), so every racer computes the same key and exactly one SET NX wins.
+// TTL is short — it only needs to outlive the window in which coalesced polls
+// fire (seconds); a fresh dead-end later (new deadline) yields a new key.
+// Returns true iff THIS caller won and should emit.
+async function claimDeadEndNotice(
+  client: UpstashClient,
+  code: string,
+  identity: string,
+): Promise<boolean> {
+  const key = `sweepDeadEnd:${code}:${identity}`;
+  const won = await client.command<string | null>(['SET', key, '1', 'NX', 'EX', '30']);
+  return won === 'OK';
 }
 
 // Lazy timeout sweep, called from the long-poll loop in apps/mcp/src/tools.ts
@@ -670,23 +816,10 @@ export interface SweepResult {
 // see what happened.
 //
 // Concurrency: a CAS-then-write race is possible (two listen polls both
-// see the same expired deadline and both write). The state writes are
-// idempotent, but the caller emits one sys message per returned skip and
-// fallback — so two concurrent sweeps of the same dead-end would post the
-// "falling back to open mode" notice (and the moderator skip) TWICE. The
-// fallback emission is therefore gated on `claimDeadEndNotice`: only the
-// sweep that wins the SET NX claim returns the fallback; the loser
-// suppresses it (state still converges via the winner's write).
-async function claimDeadEndNotice(
-  client: UpstashClient,
-  code: string,
-  identity: string,
-): Promise<boolean> {
-  const key = `sweepDeadEnd:${code}:${identity}`;
-  const won = await client.command<string | null>(['SET', key, '1', 'NX', 'EX', '30']);
-  return won === 'OK';
-}
-
+// see the same expired deadline and both write). Idempotency comes from
+// `spoken.at` being monotonically advanced: a second writer who lost the
+// race will append duplicates only if both fired at the exact same ms,
+// which is rare and self-healing on the next read.
 export async function sweepTimeouts(
   client: UpstashClient,
   code: string,
@@ -701,24 +834,94 @@ export async function sweepTimeouts(
   let state = timeout.state;
   const skipped = timeout.skipped;
 
-  // Step 2: dead-end checks. These can trigger a fallback to 'open'.
+  // Step 2: dead-end checks. A dead-ended moderator is handed off to a deputy
+  // when one exists; only when nobody can take over do we fall back to 'open'.
   let fallback: SweepResult['fallback'];
 
   if (room.replyMode === 'moderator' && prev.moderatorName && prev.moderatorClient) {
-    // Moderator absent from participants → fallback.
+    // Moderator absent from participants, or its deadline expired this sweep.
     const modPresent = room.participants.some(p =>
       p.name === prev.moderatorName && p.client === prev.moderatorClient && p.canSpeak !== false,
     );
+    let deadEnd: FallbackReason | undefined;
     if (!modPresent) {
-      fallback = {
-        reason: 'moderator_left',
-        agentName: prev.moderatorName,
-        agentClient: prev.moderatorClient,
-      };
+      deadEnd = 'moderator_left';
     } else if (skipped.some(s => s.role === 'moderator')) {
-      // Moderator's deadline expired in this sweep.
+      // Moderator's deadline expired in this sweep — UNLESS the moderator just
+      // posted an assignment in the last 30s. After assigning sub-agents the
+      // moderator legitimately goes quiet while they work; a sweep that fires in
+      // that window must NOT disturb the floor, or the sub-agents' delayed
+      // respond calls arrive to a room whose moderator turn was reset and the
+      // assignments are silently ignored (the "assigned, nobody executed" bug).
+      // Treat a just-spoken moderator as still holding the floor.
+      const modJustSpoke = prev.spoken.some(s =>
+        s.name === prev.moderatorName
+        && s.client === prev.moderatorClient
+        && s.status === 'replied'
+        && now - s.at < 30_000,
+      );
+      if (!modJustSpoke) deadEnd = 'moderator_timeout';
+    }
+
+    if (deadEnd) {
+      // Concurrency dedupe. Two listen polls can read the SAME expired
+      // moderator deadline and both run this dead-end transition. The state
+      // writes below are idempotent, but the caller emits a sys message per
+      // returned skip/handoff/fallback — so a double sweep posts the skip
+      // notice and the handoff/fallback notice TWICE (observed in prod as
+      // duplicate "skipping moderator slot" + "handing the floor" spam). Gate
+      // the emission on a SET NX lock keyed on the expired moderator + the
+      // exact deadline that lapsed — both racers compute the identical key
+      // from the same `prev`, so only the winner returns the messages; the
+      // loser suppresses them (state already converges via the winner's
+      // write). Best-effort: if the lock client errors, fall through and emit
+      // (a rare duplicate beats a silently-dropped handoff notice).
+      const claimed = await claimDeadEndNotice(
+        client, code,
+        `mod:${prev.moderatorName}:${prev.moderatorClient}:${prev.deadline ?? 'none'}`,
+      ).catch(() => true);
+      if (!claimed) return { state, skipped: [] };
+      // Prefer handing the floor to a deputy over collapsing the room. A
+      // collapsed moderator room loses its coordinator and devolves into the
+      // open-mode free-for-all this whole machine exists to prevent.
+      const deputy = pickDeputyModerator(room, { name: prev.moderatorName, client: prev.moderatorClient });
+      if (deputy) {
+        // Promote the deputy: keep moderator mode, repoint the configured
+        // moderator, and start them on a fresh moderator turn so they hold the
+        // floor (and get woken by the caller when hosted). Best-effort room
+        // CAS; we compute the promoted room locally so newModeratorTurn picks
+        // the deputy even if the CAS lost a race.
+        const promotedRoom: Room = {
+          ...room,
+          replyMode: 'moderator',
+          modeConfig: { ...room.modeConfig, moderatorAgentName: deputy.name, moderatorAgentClient: deputy.client },
+        };
+        try {
+          await casRoom(client, code, (current) => ({
+            ...current,
+            replyMode: 'moderator',
+            modeConfig: { ...current.modeConfig, moderatorAgentName: deputy.name, moderatorAgentClient: deputy.client },
+          }));
+        } catch { /* best-effort — local promotedRoom still drives the turn */ }
+        const newTurn = newModeratorTurn(promotedRoom, now, now);
+        if (newTurn) {
+          try { await setTurnState(client, code, newTurn); } catch { /* best-effort */ }
+          return {
+            state: newTurn,
+            skipped,
+            handoff: {
+              reason: deadEnd,
+              fromName: prev.moderatorName,
+              fromClient: prev.moderatorClient,
+              toName: deputy.name,
+              toClient: deputy.client,
+            },
+          };
+        }
+      }
+      // No deputy (or couldn't start their turn) → fall back to 'open'.
       fallback = {
-        reason: 'moderator_timeout',
+        reason: deadEnd,
         agentName: prev.moderatorName,
         agentClient: prev.moderatorClient,
       };
@@ -730,6 +933,14 @@ export async function sweepTimeouts(
       p.name === prev.leadName && p.client === prev.leadClient && p.canSpeak !== false,
     );
     if (!leadPresent && (state?.currentName || (state?.queue.length ?? 0) > 0)) {
+      // Same concurrency dedupe as the moderator dead-end: only one racer emits
+      // the lead-left fallback notice. Loser suppresses (state converges via the
+      // winner's room CAS + turn clear below).
+      const claimed = await claimDeadEndNotice(
+        client, code,
+        `lead:${prev.leadName}:${prev.leadClient}:${prev.deadline ?? 'none'}`,
+      ).catch(() => true);
+      if (!claimed) return { state, skipped: [] };
       fallback = {
         reason: 'lead_left',
         agentName: prev.leadName,
@@ -739,18 +950,6 @@ export async function sweepTimeouts(
   }
 
   if (fallback) {
-    // Dedupe concurrent sweeps of the same dead-end so the caller emits the
-    // fallback notice once. The key is derived purely from `prev` (the absent
-    // role + the deadline that lapsed), so every racer computes the same key
-    // and exactly one SET NX wins. Loser suppresses skip + fallback (the
-    // winner's room CAS + turn clear below still converge the state).
-    // Best-effort: if the lock client errors, fall through and emit (a rare
-    // duplicate beats a silently-dropped fallback notice).
-    const claimed = await claimDeadEndNotice(
-      client, code,
-      `${fallback.reason}:${fallback.agentName}:${fallback.agentClient}:${prev.deadline ?? 'none'}`,
-    ).catch(() => true);
-    if (!claimed) return { state, skipped: [] };
     // Flip replyMode to 'open' and clear turnState. Best-effort: if the
     // room CAS fails (concurrent setReplyMode), we still clear local
     // state and surface the event — the room write will eventually

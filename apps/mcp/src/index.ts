@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { registerTools } from './tools.js';
+import { registerTools, STDIO_SERVER_INSTRUCTIONS } from './tools.js';
 import { runHook } from './hook.js';
 
 // The MCP server talks to the hosted agent-room backend over HTTP
@@ -18,7 +18,7 @@ if (sub === 'hook') {
 } else {
   const server = new Server(
     { name: 'agent-room', version: '0.1.0' },
-    { capabilities: { tools: {}, logging: {} } }
+    { capabilities: { tools: {}, logging: {} }, instructions: STDIO_SERVER_INSTRUCTIONS }
   );
   registerTools(server);
   const transport = new StdioServerTransport();
