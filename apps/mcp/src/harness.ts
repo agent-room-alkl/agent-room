@@ -1,7 +1,7 @@
 // Detect which agent harness is running this MCP process. Used to
 // conditionally append a persistence-setup nudge to room_join /
 // room_create hints — harnesses that don't auto-loop tool calls
-// (Cursor without 1.7+ stop hooks, Gemini CLI, etc.)
+// (Cursor without 1.7+ stop hooks, Antigravity, etc.)
 // silently drop out of rooms unless the user has run
 // `npx agent-room-mcp init`.
 
@@ -9,7 +9,7 @@ export type ClientKind =
   | 'claude-code'
   | 'cursor'
   | 'codex'
-  | 'gemini-cli'
+  | 'antigravity'
   | 'claude-desktop'
   | 'cline'
   | 'windsurf'
@@ -27,7 +27,7 @@ export interface HarnessInfo {
   label: string;
   /** Safe duration for a single blocking MCP tool call (e.g. room_listen) on
    *  this harness. Strong-loop harnesses (Claude Code, Codex) have no short MCP
-   *  timeout and allow long listens; Cursor / Gemini / other IDE clients cap
+   *  timeout and allow long listens; Cursor / Antigravity / other IDE clients cap
    *  MCP calls (~60s), so their listens must stay well under that. */
   maxListenMs: number;
 }
@@ -35,7 +35,7 @@ export interface HarnessInfo {
 /** Long listen window for harnesses with no short MCP tool-call timeout. */
 export const STRONG_MAX_LISTEN_MS = 270_000;
 /** Conservative cap for harnesses that time out long MCP tool calls — Cursor,
- *  Gemini CLI, Cline, Windsurf, and unknown clients. Keep listens under ~60s. */
+ *  Antigravity, Cline, Windsurf, and unknown clients. Keep listens under ~60s. */
 export const WEAK_MAX_LISTEN_MS = 45_000;
 
 const KNOWN_STRONG_LOOP: HarnessInfo[] = [
@@ -60,8 +60,15 @@ export function detectHarness(env: NodeJS.ProcessEnv = process.env): HarnessInfo
   if (env.CURSOR_TRACE_ID || env.CURSOR_AGENT || env.TERM_PROGRAM === 'Cursor') {
     return { kind: 'cursor', needsPersistenceSetup: true, label: 'Cursor', maxListenMs: WEAK_MAX_LISTEN_MS };
   }
-  if (env.GEMINI_CLI || env.GOOGLE_GEMINI_CLI) {
-    return { kind: 'gemini-cli', needsPersistenceSetup: true, label: 'Gemini CLI', maxListenMs: WEAK_MAX_LISTEN_MS };
+  if (
+    env.ANTIGRAVITY_CLI ||
+    env.ANTIGRAVITY ||
+    env.GOOGLE_ANTIGRAVITY ||
+    env.TERM_PROGRAM === 'Antigravity' ||
+    env.GEMINI_CLI ||
+    env.GOOGLE_GEMINI_CLI
+  ) {
+    return { kind: 'antigravity', needsPersistenceSetup: true, label: 'Antigravity', maxListenMs: WEAK_MAX_LISTEN_MS };
   }
   // The Claude desktop app embeds the same Code/Cowork agent runtime as the
   // CLI — surface differs, product is the same. Label as `Claude Code` so
@@ -86,13 +93,13 @@ export function detectHarness(env: NodeJS.ProcessEnv = process.env): HarnessInfo
  */
 export function persistenceSetupHint(info: HarnessInfo): string {
   if (!info.needsPersistenceSetup) return '';
-  if (info.kind === 'gemini-cli') {
+  if (info.kind === 'antigravity') {
     return (
       ` PERSISTENCE NOTE (${info.label}): if a pasted Agent Room URL does not ` +
-      `trigger room_join, exit and run \`npx agent-room-mcp init gemini\` so ` +
-      `Gemini loads the MCP server and its global GEMINI.md join rule, then ` +
-      `restart Gemini CLI. Gemini CLI does not currently support stop hooks, ` +
-      `so after joining, ask it to keep calling room_listen explicitly.`
+      `trigger room_join, exit and run \`npx agent-room-mcp init antigravity\` so ` +
+      `Antigravity loads the global MCP config and ~/.gemini/GEMINI.md join rule, ` +
+      `then restart Antigravity. After joining, ask it to keep calling room_listen ` +
+      `explicitly — Antigravity does not currently support stop hooks.`
     );
   }
   return (
@@ -107,7 +114,7 @@ export function persistenceSetupHint(info: HarnessInfo): string {
 export function defaultListenAfterJoin(harness: HarnessInfo, explicit: unknown): boolean {
   if (explicit === false) return false;
   if (explicit === true) return true;
-  // Weak-loop harnesses (Cursor, Gemini, Cline, …) time out long MCP tool
+  // Weak-loop harnesses (Cursor, Antigravity, Cline, …) time out long MCP tool
   // calls, so a bundled long first-listen on join can exceed their limit and
   // stall the session. They each have their own persistence (stop hook /
   // autoWatch / manual room_listen), so skip the bundled listen and let them

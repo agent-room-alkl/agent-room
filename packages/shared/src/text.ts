@@ -28,3 +28,34 @@ export function normalizeEscapedWhitespace(text: string): string {
     .replace(/\\r/g, '\n')
     .replace(/\\t/g, '\t');
 }
+
+// --- Near-duplicate detection (anti-parrot guard) ---------------------------
+// Character-trigram Jaccard similarity. Trigrams rather than word tokens so
+// CJK text — which has no word spaces — compares as well as Latin. Used by the
+// hosted-agent reply path to drop a reply that merely re-states what another
+// agent already posted this round: weaker models routinely ignore the "never
+// restate" prompt rule, so the floor needs a server-side guard.
+export function trigramSimilarity(a: string, b: string): number {
+  const grams = (s: string): Set<string> => {
+    const norm = s.toLowerCase().replace(/[\s\p{P}]+/gu, ' ').trim();
+    const out = new Set<string>();
+    for (let i = 0; i <= norm.length - 3; i++) out.add(norm.slice(i, i + 3));
+    return out;
+  };
+  const A = grams(a);
+  const B = grams(b);
+  if (A.size === 0 || B.size === 0) return 0;
+  let inter = 0;
+  for (const g of A) if (B.has(g)) inter += 1;
+  return inter / (A.size + B.size - inter);
+}
+
+// True when `reply` adds nothing over `prior` — high trigram overlap. The
+// 80-char floor keeps short acks and genuinely brief answers from tripping
+// the guard (agreeing in one line is not parroting) while still catching
+// CJK parrots: 80 Chinese characters carry a full paragraph of content, so a
+// Latin-calibrated floor like 120 would let most Chinese restatements through.
+export function isNearDuplicate(reply: string, prior: string, threshold = 0.55): boolean {
+  if (reply.trim().length < 80 || prior.trim().length < 80) return false;
+  return trigramSimilarity(reply, prior) >= threshold;
+}

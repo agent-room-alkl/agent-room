@@ -13,12 +13,15 @@
 // deploy.
 
 import type {
+  ClientKind,
   Message,
   Participant,
   ReplyMode,
   ReplyModeConfig,
   Room,
   RoomReport,
+  Task,
+  TaskBoard,
 } from '@agent-room/shared';
 import type { AppendResult, TurnState, TurnSpokenEntry } from '@agent-room/upstash-client';
 
@@ -42,6 +45,13 @@ export class NotYourTurnError extends Error { constructor(m: string) { super(m);
 export class NotHostError extends Error { constructor(m: string) { super(m); this.name = 'NotHostError'; } }
 export class InvalidModeConfigError extends Error { constructor(m: string) { super(m); this.name = 'InvalidModeConfigError'; } }
 export class ModeNotSupportedError extends Error { constructor(m: string) { super(m); this.name = 'ModeNotSupportedError'; } }
+export class TaskNotFoundError extends Error { constructor(m: string) { super(m); this.name = 'TaskNotFoundError'; } }
+export class TaskExistsError extends Error { constructor(m: string) { super(m); this.name = 'TaskExistsError'; } }
+export class TaskStateError extends Error { constructor(m: string) { super(m); this.name = 'TaskStateError'; } }
+export class EvidenceIncompleteError extends Error { constructor(m: string) { super(m); this.name = 'EvidenceIncompleteError'; } }
+export class NotVerifierError extends Error { constructor(m: string) { super(m); this.name = 'NotVerifierError'; } }
+export class OwnerCannotVerifyError extends Error { constructor(m: string) { super(m); this.name = 'OwnerCannotVerifyError'; } }
+export class TaskDoneImmutableError extends Error { constructor(m: string) { super(m); this.name = 'TaskDoneImmutableError'; } }
 
 function errorFromBody(error: string | undefined, message: string, status: number): Error {
   switch (error) {
@@ -53,6 +63,13 @@ function errorFromBody(error: string | undefined, message: string, status: numbe
     case 'NotHostError': return new NotHostError(message);
     case 'InvalidModeConfigError': return new InvalidModeConfigError(message);
     case 'ModeNotSupportedError': return new ModeNotSupportedError(message);
+    case 'TaskNotFoundError': return new TaskNotFoundError(message);
+    case 'TaskExistsError': return new TaskExistsError(message);
+    case 'TaskStateError': return new TaskStateError(message);
+    case 'EvidenceIncompleteError': return new EvidenceIncompleteError(message);
+    case 'NotVerifierError': return new NotVerifierError(message);
+    case 'OwnerCannotVerifyError': return new OwnerCannotVerifyError(message);
+    case 'TaskDoneImmutableError': return new TaskDoneImmutableError(message);
     default: return new RoomApiError(message, status);
   }
 }
@@ -97,12 +114,14 @@ export function createRoomApiClient(): RoomApiClient {
 
 export async function createRoom(
   client: RoomApiClient,
-  input: { topic: string; createdBy: string },
+  input: { topic: string; createdBy: string; projectId?: string; projectKey?: string },
 ): Promise<Room & { hostKey: string }> {
   const body = await client.post<{ room: Room & { hostKey: string }; hostKey: string }>({
     action: 'create',
     topic: input.topic,
     createdBy: input.createdBy,
+    // Optional durable-project attach (capability key proves authority).
+    ...(input.projectId ? { projectId: input.projectId, projectKey: input.projectKey } : {}),
   });
   return { ...body.room, hostKey: body.hostKey };
 }
@@ -271,4 +290,79 @@ export async function hostSkipCurrent(
     hostKey,
   });
   return body.skipped;
+}
+
+// ─── Evidence-gated task board ───────────────────────────────────────────
+
+export async function getTaskBoard(client: RoomApiClient, code: string): Promise<TaskBoard> {
+  const body = await client.post<{ board: TaskBoard }>({ action: 'taskBoard', code });
+  return body.board;
+}
+
+export async function createTask(
+  client: RoomApiClient,
+  code: string,
+  requesterName: string,
+  input: { title: string; id?: string; owner?: string; ownerClient?: ClientKind; verifier?: string; verifierClient?: ClientKind; dod?: string },
+): Promise<{ board: TaskBoard; task: Task }> {
+  return client.post<{ board: TaskBoard; task: Task }>({
+    action: 'taskCreate', code, requesterName, ...input,
+  });
+}
+
+export async function claimTask(
+  client: RoomApiClient,
+  code: string,
+  id: string,
+  name: string,
+  clientKind: ClientKind,
+): Promise<{ board: TaskBoard; task: Task }> {
+  return client.post<{ board: TaskBoard; task: Task }>({
+    action: 'taskClaim', code, id, name, client: clientKind,
+  });
+}
+
+export async function submitTask(
+  client: RoomApiClient,
+  code: string,
+  id: string,
+  name: string,
+  clientKind: ClientKind,
+  evidence: { fileListing: string; fileExcerpt: string; runOutput: string; exitCode: number },
+): Promise<{ board: TaskBoard; task: Task }> {
+  return client.post<{ board: TaskBoard; task: Task }>({
+    action: 'taskSubmit', code, id, name, client: clientKind, evidence,
+  });
+}
+
+export async function verifyTask(
+  client: RoomApiClient,
+  code: string,
+  id: string,
+  name: string,
+  clientKind: ClientKind,
+  verdict: 'done' | 'rejected',
+  note?: string,
+): Promise<{ board: TaskBoard; task: Task }> {
+  return client.post<{ board: TaskBoard; task: Task }>({
+    action: 'taskVerify', code, id, name, client: clientKind, verdict, note,
+  });
+}
+
+// Reassign a task's owner and/or verifier without changing its state. Gated
+// server-side: the caller must be the proven host (hostKey) or the room's
+// configured Moderator/Lead — the server resolves that from stored room
+// state, never from this client's claim.
+export async function reassignTaskRoles(
+  client: RoomApiClient,
+  code: string,
+  id: string,
+  requesterName: string,
+  requesterClient: ClientKind,
+  patch: { owner?: string; ownerClient?: ClientKind; verifier?: string; verifierClient?: ClientKind },
+  hostKey?: string,
+): Promise<{ board: TaskBoard; task: Task }> {
+  return client.post<{ board: TaskBoard; task: Task }>({
+    action: 'taskReassign', code, id, requesterName, requesterClient, hostKey, ...patch,
+  });
 }

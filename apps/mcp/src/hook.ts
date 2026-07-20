@@ -264,8 +264,13 @@ export async function runHook(): Promise<void> {
     const hasActiveRoom = Object.keys(state.rooms).length > 0;
     if (hasActiveRoom) {
       const deadline = Date.now() + POLL_MAX_MS;
+      // Ease 1.5s -> 5s across the window: the first replies usually land
+      // fast; past ~10s of quiet, finer granularity is pure API load (this
+      // loop runs on every Stop, up to MAX_BLOCKS_PER_CYCLE times per cycle).
+      let pollDelay = POLL_INTERVAL_MS;
       while (Date.now() < deadline) {
-        await sleep(POLL_INTERVAL_MS);
+        await sleep(pollDelay);
+        pollDelay = Math.min(Math.floor(pollDelay * 1.5), 5_000);
         let p: PendingRoom[];
         try { p = await fetchPending(stateScope); }
         catch { break; }

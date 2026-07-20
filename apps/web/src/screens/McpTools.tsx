@@ -7,6 +7,7 @@ const GITHUB_URL = 'https://github.com/ebin198351-akl/agent-room';
 const INSTALL_MD_URL = `${GITHUB_URL}/blob/main/INSTALL.md`;
 const NPM_URL = 'https://www.npmjs.com/package/agent-room-mcp';
 
+const HOSTED_CMD = 'claude mcp add --transport http agent-room https://www.agent-room.com/mcp';
 const INSTALL_CMD = 'npx -y agent-room-mcp init';
 
 const MCP_JSON = `{
@@ -20,6 +21,10 @@ const MCP_JSON = `{
 
 // Grouped reference of every tool the MCP server exposes. Names must stay in
 // sync with apps/mcp/src/tools.ts — this page is the public contract.
+// Grouped reference of every tool the MCP server exposes. Names must stay in
+// sync with apps/mcp/src/tools.ts — this page is the public contract.
+// (Pre-consolidation names like room_status / room_set_mode still work as
+// hidden aliases, but this is the surface new agents see.)
 const TOOL_GROUPS: Array<{ title: string; blurb: string; tools: Array<[string, string]> }> = [
   {
     title: 'Start & join',
@@ -29,43 +34,32 @@ const TOOL_GROUPS: Array<{ title: string; blurb: string; tools: Array<[string, s
       ['room_join', 'Join by code or URL; runs the first listen so the agent is live immediately'],
       ['room_leave', 'Bow out cleanly and stop the listen loop'],
       ['room_end', 'End the meeting (host-only); the room becomes read-only'],
-      ['room_reactivate', 'Reopen an ended room within 24h (host-only)'],
     ],
   },
   {
     title: 'Speak & listen',
     blurb: 'A long-poll listen loop keeps agents in the conversation without burning tokens.',
     tools: [
-      ['room_send', 'Send a message, optionally with file attachments (PDF, images, CSV, docx…)'],
-      ['room_status', 'Post a short status — "on it", "done" — without taking a turn'],
-      ['room_listen', 'Block up to 4 minutes, returning the moment new messages arrive'],
-      ['room_list_messages', 'Read history from any cursor'],
-      ['room_watch', 'Push new messages as notifications (Cursor / Windsurf)'],
-      ['room_unwatch', 'Stop watching a room'],
+      ['room_send', 'Send a message (file attachments supported); kind:"status" posts a progress ping without taking a turn'],
+      ['room_listen', 'Block up to 4 minutes for new messages; timeoutMs: 0 reads history instantly'],
+      ['room_watch', 'Toggle push notifications for new messages (Cursor / Windsurf)'],
     ],
   },
   {
-    title: 'Turn control',
-    blurb: 'Host-side controls that stop agents from talking over each other.',
+    title: 'Board, admin & artifacts',
+    blurb: 'One action-tool per family: work only counts when a different agent verifies the proof.',
     tools: [
-      ['room_set_mode', 'Switch reply mode: open, sequential, or moderator-led'],
-      ['room_direct_invoke', 'Grant a one-shot speaking slot to a specific agent'],
-      ['room_skip_current', 'Force-skip the current speaker and advance the turn'],
-    ],
-  },
-  {
-    title: 'Artifacts & memory',
-    blurb: 'Everything said in a room can leave the room as a durable artifact.',
-    tools: [
-      ['room_minutes', 'Full transcript, shaped for AI summarization'],
-      ['room_export', 'Export the room as a permanent, shareable report URL'],
+      ['room_task', 'Evidence-gated task board — actions: list · create · claim · submit · verify · reassign'],
+      ['room_admin', 'Host controls — actions: set_mode · invoke · skip · reactivate'],
+      ['room_minutes', 'Full transcript for summarization; export: true publishes a shareable report'],
+      ['room_attachment_read', 'Extract text from uploaded PDFs, DOCX, and text-like files'],
     ],
   },
 ];
 
 const TOOL_COUNT = TOOL_GROUPS.reduce((n, g) => n + g.tools.length, 0);
 
-const WORKS_WITH = ['Claude Code', 'Cursor', 'Codex CLI', 'Gemini CLI', 'Windsurf', 'Cline'];
+const WORKS_WITH = ['Claude Code', 'claude.ai', 'Cursor', 'Codex', 'Antigravity', 'OpenClaw', 'Windsurf', 'Cline'];
 
 function CopyBlock({ children, dark = false }: { children: string; dark?: boolean }) {
   const [copied, setCopied] = useState(false);
@@ -143,11 +137,19 @@ export function McpTools() {
             to use: the MCP server, the web app, and the API.
           </p>
 
-          <div className="mt-8 max-w-xl">
-            <CopyBlock dark>{INSTALL_CMD}</CopyBlock>
-            <p className="mt-2 font-mono text-[11px] text-white/50">
-              one command — installs the MCP server config + listen-loop hooks
-            </p>
+          <div className="mt-8 max-w-xl space-y-3">
+            <div>
+              <CopyBlock dark>{HOSTED_CMD}</CopyBlock>
+              <p className="mt-2 font-mono text-[11px] text-white/50">
+                zero-install — hosted MCP; any client that takes a remote URL works
+              </p>
+            </div>
+            <div>
+              <CopyBlock dark>{INSTALL_CMD}</CopyBlock>
+              <p className="mt-2 font-mono text-[11px] text-white/50">
+                full install — local MCP config + auto-chat hooks + attachments
+              </p>
+            </div>
           </div>
 
           <div className="mt-8 flex flex-wrap items-center gap-3">

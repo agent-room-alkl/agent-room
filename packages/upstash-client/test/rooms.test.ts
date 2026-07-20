@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { AVATAR_PALETTE, type Room } from '@agent-room/shared';
-import { createClient, createRoom, getRoom, RoomNotFoundError, casRoom, ConcurrencyError, joinRoom } from '../src/index.js';
+import { createClient, createRoom, getRoom, RoomNotFoundError, casRoom, ConcurrencyError, joinRoom, InterviewRoomBusyError } from '../src/index.js';
 
 const ENV = { url: 'https://example.upstash.io', token: 't' };
 
@@ -20,9 +20,13 @@ describe('createRoom', () => {
       code: 'ABC-DEF-GHJ',
       topic: 'Q3',
       createdBy: 'Alex',
+      ownerId: 'user_123',
+      ownerEmail: 'alex@example.com',
+      ownerName: 'Alex Host',
     });
 
     expect(room.code).toBe('ABC-DEF-GHJ');
+    expect(room.ownerId).toBe('user_123');
     expect(room.version).toBe(1);
     expect(room.participants).toEqual([]);
 
@@ -32,6 +36,9 @@ describe('createRoom', () => {
     expect(cmd[1]).toBe('room:ABC-DEF-GHJ');
     const stored = JSON.parse(cmd[2]);
     expect(stored.topic).toBe('Q3');
+    expect(stored.ownerId).toBe('user_123');
+    expect(stored.ownerEmail).toBe('alex@example.com');
+    expect(stored.ownerName).toBe('Alex Host');
     expect(cmd).toContain('EX');
     expect(cmd).toContain(86400);
   });
@@ -188,6 +195,58 @@ describe('joinRoom', () => {
     expect(updated.participants).toHaveLength(1);
   });
 
+  it('owner rejoin canonicalizes host name and evicts stale case-variant web host rows', async () => {
+    const before: Room = {
+      code: 'A', topic: 't', createdAt: 0, createdBy: 'Robin', ownerId: 'user_owner',
+      status: 'active', version: 1,
+      participants: [
+        { name: 'Robin', role: '', color: '#000', initials: 'RO', client: 'web', joinedAt: 0, lastSeenAt: 0, canSpeak: true },
+        { name: 'Claude', role: '', color: '#111', initials: 'CL', client: 'cc', joinedAt: 0, lastSeenAt: 0, canSpeak: true },
+      ],
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(mockResp({ result: JSON.stringify(before) }))
+      .mockResolvedValueOnce(mockResp({ result: 'OK' }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = createClient(ENV);
+    const updated = await joinRoom(client, 'A', {
+      name: 'robin', role: '', color: '#222', initials: 'RO', client: 'web',
+      joinedAt: 100, lastSeenAt: 100,
+    }, {
+      authedUserId: 'user_owner',
+      priorIdentity: { name: 'robin', client: 'web' },
+    });
+
+    expect(updated.participant.name).toBe('Robin');
+    const webHosts = updated.participants.filter(p => p.client === 'web');
+    expect(webHosts).toHaveLength(1);
+    expect(webHosts[0]!.name).toBe('Robin');
+    expect(updated.participants.some(p => p.name === 'Claude')).toBe(true);
+  });
+
+  it('case-insensitive host name reclaim without ownerId still uses canonical createdBy', async () => {
+    const before: Room = {
+      code: 'A', topic: 't', createdAt: 0, createdBy: 'Robin', status: 'active', version: 1,
+      participants: [
+        { name: 'Robin', role: '', color: '#000', initials: 'RO', client: 'web', joinedAt: 0, lastSeenAt: 0, canSpeak: true },
+      ],
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(mockResp({ result: JSON.stringify(before) }))
+      .mockResolvedValueOnce(mockResp({ result: 'OK' }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = createClient(ENV);
+    const updated = await joinRoom(client, 'A', {
+      name: 'robin', role: '', color: '#222', initials: 'RO', client: 'web',
+      joinedAt: 100, lastSeenAt: 100,
+    });
+
+    expect(updated.participant.name).toBe('Robin');
+    expect(updated.participants.filter(p => p.client === 'web')).toHaveLength(1);
+  });
+
   it('chooses an unused avatar color when the requested color is already taken', async () => {
     const before: Room = {
       code: 'A', topic: 't', createdAt: 0, createdBy: 'host', status: 'active', version: 1,
@@ -225,5 +284,132 @@ describe('joinRoom', () => {
     // Mute model: everyone (web + cc) defaults to true. Host mutes
     // specific participants via setMuted() if they need to be silenced.
     expect(updated.participant.canSpeak).toBe(true);
+  });
+
+  describe('interview room candidate lock', () => {
+    // Interview rooms are 1-on-1: at most one candidate (web, non-host) seat
+    // per invite link. The lock fires server-side inside joinRoom's CAS
+    // mutator. AI Interviewer (cc) and host (web) are both exempt; MCP
+    // agents (cc) can still observe. Same candidate refreshing (priorIdentity
+    // match) is also exempt so a browser reload doesn't lock them out.
+    it('lets the first candidate join an interview room', async () => {
+      const before: Room = {
+        code: 'A', topic: 'AI Interview', createdAt: 0, createdBy: 'Host', status: 'active', version: 1,
+        participants: [
+          { name: 'Host', role: 'Host', color: '#000', initials: 'HO', client: 'web', joinedAt: 0, lastSeenAt: 0, canSpeak: true },
+          { name: 'AI Interviewer', role: 'Interviewer', color: '#111', initials: 'AI', client: 'cc', joinedAt: 0, lastSeenAt: 0, canSpeak: true },
+        ],
+      };
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(mockResp({ result: JSON.stringify(before) }))
+        .mockResolvedValueOnce(mockResp({ result: 'OK' }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      const client = createClient(ENV);
+      const updated = await joinRoom(client, 'A', {
+        name: 'Alice', role: 'Candidate', color: '#222', initials: 'AL', client: 'web',
+        joinedAt: 100, lastSeenAt: 100,
+      });
+
+      expect(updated.participant.name).toBe('Alice');
+      expect(updated.participants).toHaveLength(3);
+    });
+
+    it('rejects a second candidate with InterviewRoomBusyError', async () => {
+      const before: Room = {
+        code: 'A', topic: 'AI Interview', createdAt: 0, createdBy: 'Host', status: 'active', version: 1,
+        participants: [
+          { name: 'Host', role: 'Host', color: '#000', initials: 'HO', client: 'web', joinedAt: 0, lastSeenAt: 0, canSpeak: true },
+          { name: 'AI Interviewer', role: 'Interviewer', color: '#111', initials: 'AI', client: 'cc', joinedAt: 0, lastSeenAt: 0, canSpeak: true },
+          { name: 'Alice', role: 'Candidate', color: '#222', initials: 'AL', client: 'web', joinedAt: 50, lastSeenAt: 50, canSpeak: true },
+        ],
+      };
+      // CAS retries up to 3 times on ConcurrencyError; busy-room throws a
+      // different error type so each attempt re-reads the room. Stub three
+      // identical GETs to cover all retry attempts.
+      const fetchMock = vi.fn().mockResolvedValue(mockResp({ result: JSON.stringify(before) }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      const client = createClient(ENV);
+      await expect(
+        joinRoom(client, 'A', {
+          name: 'Bob', role: 'Candidate', color: '#333', initials: 'BO', client: 'web',
+          joinedAt: 100, lastSeenAt: 100,
+        }),
+      ).rejects.toBeInstanceOf(InterviewRoomBusyError);
+    });
+
+    it('lets the same candidate refresh via priorIdentity', async () => {
+      const before: Room = {
+        code: 'A', topic: 'AI Interview', createdAt: 0, createdBy: 'Host', status: 'active', version: 1,
+        participants: [
+          { name: 'Host', role: 'Host', color: '#000', initials: 'HO', client: 'web', joinedAt: 0, lastSeenAt: 0, canSpeak: true },
+          { name: 'Alice', role: 'Candidate', color: '#222', initials: 'AL', client: 'web', joinedAt: 50, lastSeenAt: 50, canSpeak: true },
+        ],
+      };
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(mockResp({ result: JSON.stringify(before) }))
+        .mockResolvedValueOnce(mockResp({ result: 'OK' }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      const client = createClient(ENV);
+      const updated = await joinRoom(client, 'A', {
+        name: 'Alice', role: 'Candidate', color: '#222', initials: 'AL', client: 'web',
+        joinedAt: 200, lastSeenAt: 200,
+      }, {
+        priorIdentity: { name: 'Alice', client: 'web' },
+      });
+
+      expect(updated.participant.name).toBe('Alice');
+      // Same row, no duplicate.
+      expect(updated.participants.filter(p => p.name === 'Alice')).toHaveLength(1);
+    });
+
+    it('lets a cc (MCP agent) join even when a candidate is already seated', async () => {
+      const before: Room = {
+        code: 'A', topic: 'AI Interview', createdAt: 0, createdBy: 'Host', status: 'active', version: 1,
+        participants: [
+          { name: 'Host', role: 'Host', color: '#000', initials: 'HO', client: 'web', joinedAt: 0, lastSeenAt: 0, canSpeak: true },
+          { name: 'Alice', role: 'Candidate', color: '#222', initials: 'AL', client: 'web', joinedAt: 50, lastSeenAt: 50, canSpeak: true },
+        ],
+      };
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(mockResp({ result: JSON.stringify(before) }))
+        .mockResolvedValueOnce(mockResp({ result: 'OK' }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      const client = createClient(ENV);
+      const updated = await joinRoom(client, 'A', {
+        name: 'Cursor', role: 'Observer', color: '#444', initials: 'CU', client: 'cc',
+        joinedAt: 100, lastSeenAt: 100,
+      });
+
+      // cc clients are exempt from the candidate lock — only web non-host
+      // joiners count as candidates.
+      expect(updated.participant.name).toBe('Cursor');
+      expect(updated.participants).toHaveLength(3);
+    });
+
+    it('does not lock non-interview rooms (topic without "interview")', async () => {
+      const before: Room = {
+        code: 'A', topic: 'Q3 planning', createdAt: 0, createdBy: 'Host', status: 'active', version: 1,
+        participants: [
+          { name: 'Host', role: 'Host', color: '#000', initials: 'HO', client: 'web', joinedAt: 0, lastSeenAt: 0, canSpeak: true },
+          { name: 'Alice', role: '', color: '#222', initials: 'AL', client: 'web', joinedAt: 50, lastSeenAt: 50, canSpeak: true },
+        ],
+      };
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(mockResp({ result: JSON.stringify(before) }))
+        .mockResolvedValueOnce(mockResp({ result: 'OK' }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      const client = createClient(ENV);
+      const updated = await joinRoom(client, 'A', {
+        name: 'Bob', role: '', color: '#333', initials: 'BO', client: 'web',
+        joinedAt: 100, lastSeenAt: 100,
+      });
+
+      expect(updated.participants).toHaveLength(3);
+    });
   });
 });

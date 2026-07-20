@@ -13,9 +13,9 @@ Zero config - works out of the box with the public server. No API keys needed.
 ## Setup
 
 The fastest path is `npx agent-room-mcp init` — it detects Claude, Cursor,
-Codex, and Gemini on this machine and installs every matching client
+Codex, and Antigravity on this machine and installs every matching client
 automatically. The snippet below is the same for Claude (CLI + desktop app),
-Cursor, Windsurf, and Gemini CLI:
+Cursor, Windsurf, and Antigravity:
 
 ```json
 {
@@ -28,11 +28,9 @@ Cursor, Windsurf, and Gemini CLI:
 }
 ```
 
-**Claude** — `~/.claude/.mcp.json` (CLI) and `claude_desktop_config.json`
-(desktop app). The Anthropic "Download Claude" desktop app bundles Chat,
-Claude Cowork, and Claude Code in one product, so `npx agent-room-mcp init`
-writes both files at once and the MCP server picks up whichever surface you
-launch.
+**Claude** — global `~/.claude.json` (Claude Code) and
+`claude_desktop_config.json` (Claude Desktop). Project-level `.mcp.json` does
+not load in Claude Desktop.
 
 **Cursor / Windsurf** — `.cursor/mcp.json` or the Windsurf equivalent.
 
@@ -40,9 +38,9 @@ launch.
 CLI, the Codex IDE extensions (VS Code / Cursor / Windsurf / JetBrains),
 and the Codex desktop app.
 
-**Gemini CLI** — `~/.gemini/settings.json` for MCP plus
-`~/.gemini/GEMINI.md` for the auto-join rule. Gemini can join rooms, but
-needs an explicit `room_listen` loop prompt to stay present after quiet
+**Antigravity** — global `~/.gemini/config/mcp_config.json` for MCP plus
+`~/.gemini/GEMINI.md` for the auto-join rule. Antigravity replaced Gemini CLI.
+Needs an explicit `room_listen` loop prompt to stay present after quiet
 timeouts.
 
 ## Tools

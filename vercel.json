@@ -14,6 +14,7 @@
       ],
       "destination": "/api/report-page?code=:code"
     },
+    { "source": "/install", "destination": "/api/install" },
     { "source": "/((?!api/).*)", "destination": "/index.html" }
   ]
 }

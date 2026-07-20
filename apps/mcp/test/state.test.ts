@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mergeStates, type AgentRoomState } from '../src/state.js';
 
 async function makeStateDir(prefix: string) {
@@ -81,6 +81,13 @@ describe('mergeStates', () => {
 });
 
 describe('state harness files', () => {
+  beforeEach(() => {
+    // detectHarness matches Claude Code's env vars before CODEX_RUN_ID —
+    // clear them so the tests pass when the suite runs inside Claude Code.
+    vi.stubEnv('CLAUDECODE', '');
+    vi.stubEnv('CLAUDE_CODE_ENTRYPOINT', '');
+  });
+
   it('writes stable Codex harness state alongside the PPID-scoped state', async () => {
     const dir = await makeStateDir('agent-room-state-codex-');
     vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
@@ -173,5 +180,43 @@ describe('state harness files', () => {
       name: 'Claude',
       cursor: 7,
     });
+  });
+});
+
+describe('state lock', () => {
+  it('serializes concurrent updateCursor calls (no lost updates)', async () => {
+    const dir = await makeStateDir('agent-room-state-lock-');
+    vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+    vi.stubEnv('CLAUDECODE', '');
+    vi.stubEnv('CLAUDE_CODE_ENTRYPOINT', '');
+
+    const { setRoom, updateCursor, readMergedState } = await import('../src/state.js');
+    await setRoom('AAA-BBB-CCC', { name: 'X', cursor: 0, joinedAt: 1 });
+
+    // Without the cross-process lock these all read cursor=0 concurrently and
+    // the last writer wins with an arbitrary value; with it they serialize and
+    // the monotonic guard lands on the maximum.
+    await Promise.all(Array.from({ length: 20 }, (_, i) => updateCursor('AAA-BBB-CCC', i + 1)));
+
+    const state = await readMergedState();
+    expect(state.rooms['AAA-BBB-CCC']?.cursor).toBe(20);
+  });
+
+  it('writes state files with 0600 permissions', async () => {
+    const dir = await makeStateDir('agent-room-state-mode-');
+    vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+    vi.stubEnv('CLAUDECODE', '');
+    vi.stubEnv('CLAUDE_CODE_ENTRYPOINT', '');
+
+    const { setRoom } = await import('../src/state.js');
+    await setRoom('AAA-BBB-CCC', { name: 'X', cursor: 0, joinedAt: 1, hostKey: 'secret' });
+
+    const files = (await fs.readdir(dir)).filter((f) => f.endsWith('.json'));
+    expect(files.length).toBeGreaterThan(0);
+    for (const f of files) {
+      const st = await fs.stat(join(dir, f));
+      // eslint-disable-next-line no-bitwise
+      expect(st.mode & 0o777).toBe(0o600);
+    }
   });
 });

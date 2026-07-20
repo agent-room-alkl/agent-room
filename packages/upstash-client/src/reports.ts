@@ -1,14 +1,22 @@
-import { extractArtifacts, type Message, type Room, type RoomReport } from '@agent-room/shared';
+import { extractArtifacts, type Message, type Room, type RoomReport, type TaskBoard } from '@agent-room/shared';
 import type { UpstashClient } from './client.js';
+import { deliverablesFromBoard, doneTasks, getTaskBoard } from './tasks.js';
 
 function reportKey(code: string): string { return `room-report:${code}`; }
 
-export const REPORT_RETENTION = 'permanent' as const;
+// Reports self-expire from Redis 24h after export — the same lifetime as the
+// room itself, so no room data outlives the room by design.
+export const REPORT_TTL_SECONDS = 24 * 60 * 60;
+export const REPORT_RETENTION = '1d' as const;
 
-export function buildRoomReport(room: Room, messages: Message[]): RoomReport {
+export function buildRoomReport(room: Room, messages: Message[], board?: TaskBoard | null): RoomReport {
   const userMessages = messages.filter(m => m.type === 'msg' && m.text.trim());
   const artifacts = extractArtifacts(userMessages);
-  const highlights = pickLines(userMessages, 8);
+  const delivered = deliverablesFromBoard(board);
+  const highlights = [
+    ...delivered.map(line => `Verified done: ${line}`),
+    ...pickLines(userMessages, 8),
+  ].slice(0, 8);
   const markedDecisions = artifacts.filter(a => a.kind === 'decision').map(a => `${a.author}: ${clip(a.text)}`);
   const markedTodos = artifacts.filter(a => a.kind === 'todo').map(a => `${a.author}: ${clip(a.text)}`);
   const decisions = markedDecisions.length
@@ -18,18 +26,26 @@ export function buildRoomReport(room: Room, messages: Message[]): RoomReport {
     ? markedTodos.slice(0, 8)
     : pickMatching(userMessages, /(下一步|需要|建议|开始|实现|部署|改|修|todo|action|follow)/i, 8);
 
+  const done = board ? doneTasks(board) : [];
+  const deliveredNote = done.length
+    ? ` ${done.length} task(s) verified done on the task board (${done.map(t => t.id).join(', ')}).`
+    : '';
+
   return {
     code: room.code,
     topic: room.topic,
     createdAt: room.createdAt,
     exportedAt: Date.now(),
+    ownerId: room.ownerId,
+    ownerEmail: room.ownerEmail,
+    ownerName: room.ownerName,
     participants: room.participants.map(p => ({
       name: p.name,
       role: p.role,
       client: p.client,
     })),
     messageCount: messages.length,
-    summary: `This report captures ${messages.length} message(s) from "${room.topic}" with ${room.participants.length} participant(s). It preserves the discussion, key takeaways, decisions, and follow-up work as a shareable meeting asset.`,
+    summary: `This report captures ${messages.length} message(s) from "${room.topic}" with ${room.participants.length} participant(s).${deliveredNote} It preserves the discussion, key takeaways, decisions, and follow-up work as a shareable meeting asset.`,
     highlights,
     decisions: decisions.length ? decisions : highlights.slice(0, 3),
     actionItems: actionItems.length ? actionItems : ['Review the transcript and confirm next implementation priority.'],
@@ -43,10 +59,10 @@ export async function createRoomReport(
   room: Room,
   messages: Message[]
 ): Promise<RoomReport> {
-  const report = buildRoomReport(room, messages);
-  // Reports are shareable meeting assets, so they intentionally outlive
-  // the 24h room TTL. Redis SET without EX/PX clears any prior TTL.
-  await client.command(['SET', reportKey(room.code), JSON.stringify(report)]);
+  const board = await getTaskBoard(client, room.code).catch(() => null);
+  const report = buildRoomReport(room, messages, board);
+  // 24h TTL — the report dies with the room (Redis drops it automatically).
+  await client.command(['SET', reportKey(room.code), JSON.stringify(report), 'EX', REPORT_TTL_SECONDS]);
   return report;
 }
 
