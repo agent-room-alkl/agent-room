@@ -37,8 +37,33 @@ describe('detectHarness', () => {
     ).toBe('claude-desktop');
   });
 
+  it('detects GitHub Copilot agent mode in VS Code', () => {
+    expect(detectHarness(env({ GITHUB_COPILOT: '1' })).kind).toBe('copilot');
+    expect(detectHarness(env({ TERM_PROGRAM: 'vscode', VSCODE_PID: '123' })).kind).toBe('copilot');
+    // Merge resolution (#399 + #400): bare VS Code markers are sufficient —
+    // VS Code-spawned MCP servers may carry no TERM_PROGRAM and vice versa.
+    expect(detectHarness(env({ TERM_PROGRAM: 'vscode' })).kind).toBe('copilot');
+    expect(detectHarness(env({ VSCODE_IPC_HOOK_CLI: '/tmp/x.sock' })).kind).toBe('copilot');
+  });
+
   it('falls back to unknown when no signals match', () => {
     expect(detectHarness(env({})).kind).toBe('unknown');
+  });
+
+  it('detects Copilot via explicit markers and generic VS Code process env', () => {
+    expect(detectHarness(env({ GITHUB_COPILOT: '1' })).kind).toBe('copilot');
+    expect(detectHarness(env({ COPILOT_AGENT: '1' })).kind).toBe('copilot');
+    expect(detectHarness(env({ VSCODE_PID: '1234' })).kind).toBe('copilot');
+    expect(detectHarness(env({ TERM_PROGRAM: 'vscode' })).kind).toBe('copilot');
+  });
+
+  it('VS Code-hosted extensions win over the generic VS Code markers', () => {
+    // Cline (and Cursor forks) inherit VSCODE_PID from the host process;
+    // their specific env vars must take precedence over the copilot branch.
+    expect(detectHarness(env({ CLINE_VERSION: '3.0', VSCODE_PID: '1234' })).kind).toBe('cline');
+    expect(
+      detectHarness(env({ CURSOR_TRACE_ID: 'abc', VSCODE_PID: '1234' })).kind,
+    ).toBe('cursor');
   });
 
   it('Claude Code wins when both Claude and Codex env vars are present', () => {
@@ -63,6 +88,7 @@ describe('detectHarness', () => {
         .needsPersistenceSetup,
     ).toBe(false);
     expect(detectHarness(env({ ANTIGRAVITY_CLI: '1' })).needsPersistenceSetup).toBe(true);
+    expect(detectHarness(env({ GITHUB_COPILOT: '1' })).needsPersistenceSetup).toBe(true);
   });
 });
 
@@ -89,12 +115,26 @@ describe('persistenceSetupHint', () => {
     expect(hint).toContain('agent-room-mcp init');
   });
 
+  it('gives Copilot an autoWatch/maxRequests nudge instead of a hook nudge', () => {
+    const hint = persistenceSetupHint(detectHarness(env({ GITHUB_COPILOT: '1' })));
+    expect(hint).toContain('GitHub Copilot');
+    expect(hint).toContain('no stop hooks');
+    expect(hint).toContain('chat.agent.maxRequests');
+    expect(hint).not.toContain('agent-room-mcp init');
+  });
+
   it('gives Antigravity a memory-rule nudge instead of a hook nudge', () => {
     const hint = persistenceSetupHint(detectHarness(env({ ANTIGRAVITY_CLI: '1' })));
     expect(hint).toContain('Antigravity');
     expect(hint).toContain('agent-room-mcp init antigravity');
     expect(hint).toContain('GEMINI.md join rule');
     expect(hint).toContain('does not currently support stop hooks');
+  });
+
+  it('names the Copilot client in persistence and timeout hints', () => {
+    const copilot = detectHarness(env({ GITHUB_COPILOT: '1' }));
+    expect(persistenceSetupHint(copilot)).toContain('GitHub Copilot (VS Code)');
+    expect(mcpTimeoutHint(copilot)).toContain('GitHub Copilot (VS Code)');
   });
 });
 

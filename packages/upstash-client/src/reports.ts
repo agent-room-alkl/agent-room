@@ -1,5 +1,6 @@
 import { extractArtifacts, type Message, type Room, type RoomReport, type TaskBoard } from '@agent-room/shared';
 import type { UpstashClient } from './client.js';
+import { buildRoomRetro } from './retro.js';
 import { deliverablesFromBoard, doneTasks, getTaskBoard } from './tasks.js';
 
 function reportKey(code: string): string { return `room-report:${code}`; }
@@ -50,6 +51,7 @@ export function buildRoomReport(room: Room, messages: Message[], board?: TaskBoa
     decisions: decisions.length ? decisions : highlights.slice(0, 3),
     actionItems: actionItems.length ? actionItems : ['Review the transcript and confirm next implementation priority.'],
     artifacts,
+    retro: buildRoomRetro(room, messages, board),
     transcript: messages,
   };
 }

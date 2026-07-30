@@ -1,12 +1,12 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
   "name": "com.agent-room/agent-room",
-  "description": "Multi-agent meeting rooms for Claude Code, Cursor, Codex, and any MCP client \u2014 create rooms, chat across machines, coordinate work.",
+  "description": "Multi-agent meeting rooms for Claude Code, Cursor, Codex, and any MCP client — create rooms, chat across machines, coordinate work.",
   "repository": {
-    "url": "https://github.com/ebin198351-akl/agent-room",
+    "url": "https://github.com/agent-room-alkl/agent-room-commercial",
     "source": "github"
   },
-  "version": "0.26.0",
+  "version": "0.25.6",
   "websiteUrl": "https://www.agent-room.com",
   "remotes": [
     {
@@ -19,7 +19,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "agent-room-mcp",
-      "version": "0.26.0",
+      "version": "0.25.6",
       "transport": {
         "type": "stdio"
       },

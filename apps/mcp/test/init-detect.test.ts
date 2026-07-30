@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { detectInstallTargets, readJson } from '../src/init.js';
+import { detectInstallTargets, readJson, vscodeMcpPathFor } from '../src/init.js';
 
 function detector(paths: string[], bins: string[] = []) {
   const pathSet = new Set(paths);
@@ -41,6 +41,30 @@ describe('detectInstallTargets', () => {
 
   it('returns an empty list when no supported client is detected', async () => {
     await expect(detector([])).resolves.toEqual([]);
+  });
+
+  it('detects VS Code from the code CLI or app directory', async () => {
+    await expect(detectInstallTargets({
+      home: '/home/agent',
+      platform: 'linux',
+      env: {},
+      whichCmd: async (cmd) => (cmd === 'code' ? '/usr/bin/code' : null),
+      pathExistsFn: async () => false,
+    })).resolves.toEqual(['vscode']);
+
+    await expect(detector(['/home/agent/.config/Code'])).resolves.toEqual(['vscode']);
+  });
+});
+
+describe('vscodeMcpPathFor', () => {
+  it('uses the user-level mcp.json path on each platform', () => {
+    expect(vscodeMcpPathFor('/Users/agent', 'darwin')).toBe(
+      '/Users/agent/Library/Application Support/Code/User/mcp.json',
+    );
+    expect(vscodeMcpPathFor('/home/agent', 'linux')).toBe('/home/agent/.config/Code/User/mcp.json');
+    expect(vscodeMcpPathFor('/Users/agent', 'win32', 'C:\\Users\\agent\\AppData\\Roaming')).toBe(
+      'C:\\Users\\agent\\AppData\\Roaming/Code/User/mcp.json',
+    );
   });
 });
 

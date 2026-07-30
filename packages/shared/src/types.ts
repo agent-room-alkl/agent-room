@@ -469,6 +469,51 @@ export interface ReportParticipant {
   client: ClientKind;
 }
 
+// Auto-generated retrospective for a room, computed from the transcript's
+// system events (timeouts, skips, task_update trail) and the task board.
+// Every section degrades independently: rooms without a board have no
+// `tasks`, pre-metadata rooms just show message distribution.
+export interface RetroTaskEntry {
+  id: string;
+  title: string;
+  state: TaskState;
+  owner?: string;
+  verifier?: string;
+  createdAt: number;
+  claimedAt?: number;    // first "(now in_progress)" task_update sys event
+  submittedAt?: number;  // latest evidence.at
+  decidedAt?: number;    // latest verdict.at
+  cycleMs?: number;      // createdAt → decidedAt, only when decided
+  rejections: number;    // count of "(now rejected)" task_update events
+  reassignments: number; // roleHistory length
+}
+
+export interface RetroParticipantEntry {
+  name: string;
+  client: ClientKind;
+  messages: number;
+  chars: number;
+  sharePct: number;      // share of chat characters, 0-100 rounded
+  timeouts: number;      // turn timeouts attributed to this participant
+  skips: number;         // host/grace skips attributed to this participant
+}
+
+export interface RoomRetro {
+  generatedAt: number;
+  durationMs: number;    // room creation → last activity
+  messageCount: number;  // chat messages (type 'msg')
+  sysEventCount: number;
+  participants: RetroParticipantEntry[];
+  tasks?: RetroTaskEntry[];
+  totals: {
+    timeouts: number;
+    skips: number;
+    rejections: number;
+    tasksDone: number;
+    tasksOpen: number;
+  };
+}
+
 export interface RoomReport {
   code: string;
   topic: string;
@@ -485,4 +530,5 @@ export interface RoomReport {
   actionItems: string[];
   artifacts: RoomArtifact[];
   transcript: Message[];
+  retro?: RoomRetro;
 }

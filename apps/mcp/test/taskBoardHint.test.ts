@@ -31,4 +31,10 @@ describe('buildTaskBoardHint', () => {
     expect(hint).toContain('3 task(s), 2 open');
     expect(hint).not.toContain('TASK BOARD — EMPTY');
   });
+
+  it('does not count rejected terminals toward the open count', () => {
+    const hint = buildTaskBoardHint(boardWith(['done', 'rejected', 'in_progress']), 'moderator');
+    expect(hint).toContain('3 task(s), 1 open');
+    expect(hint).toContain('rejected');
+  });
 });
