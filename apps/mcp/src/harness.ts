@@ -13,6 +13,7 @@ export type ClientKind =
   | 'claude-desktop'
   | 'cline'
   | 'windsurf'
+  | 'copilot'
   | 'unknown';
 
 export interface HarnessInfo {
@@ -82,6 +83,25 @@ export function detectHarness(env: NodeJS.ProcessEnv = process.env): HarnessInfo
   if (env.WINDSURF_VERSION || env.TERM_PROGRAM === 'Windsurf') {
     return { kind: 'windsurf', needsPersistenceSetup: true, label: 'Windsurf', maxListenMs: WEAK_MAX_LISTEN_MS };
   }
+  // GitHub Copilot agent mode (VS Code). Explicit markers first (users set
+  // GITHUB_COPILOT=1 in mcp.json env per INSTALL.md); generic VS Code
+  // process markers (VSCODE_PID/VSCODE_CWD/VSCODE_IPC_HOOK_CLI) rank LAST
+  // before 'unknown' because every VS Code-hosted extension (Cline, etc.)
+  // inherits them — the branches above must win when their specific vars are
+  // present. Bare markers stay sufficient: MCP servers spawned by VS Code
+  // itself (not an integrated terminal) may carry no TERM_PROGRAM.
+  if (
+    env.GITHUB_COPILOT ||
+    env.COPILOT_AGENT ||
+    env.VSCODE_COPILOT ||
+    env.VSCODE_GITHUB_COPILOT ||
+    env.VSCODE_PID ||
+    env.VSCODE_CWD ||
+    env.VSCODE_IPC_HOOK_CLI ||
+    env.TERM_PROGRAM === 'vscode'
+  ) {
+    return { kind: 'copilot', needsPersistenceSetup: true, label: 'GitHub Copilot (VS Code)', maxListenMs: WEAK_MAX_LISTEN_MS };
+  }
   return { kind: 'unknown', needsPersistenceSetup: true, label: 'this client', maxListenMs: WEAK_MAX_LISTEN_MS };
 }
 
@@ -93,6 +113,19 @@ export function detectHarness(env: NodeJS.ProcessEnv = process.env): HarnessInfo
  */
 export function persistenceSetupHint(info: HarnessInfo): string {
   if (!info.needsPersistenceSetup) return '';
+  if (info.kind === 'copilot') {
+    // Copilot agent mode has no stop/lifecycle hooks, so the init-hooks nudge
+    // would be a dead end. autoWatch (background poller + logging
+    // notifications) is the persistence path; the request budget is the real
+    // ceiling users can raise.
+    return (
+      ` PERSISTENCE NOTE (${info.label}): Copilot has no stop hooks, so background ` +
+      `room watching is active instead — new messages arrive as notifications. ` +
+      `Keep this chat session open to stay in the room, and raise ` +
+      `"chat.agent.maxRequests" in VS Code settings (default 25) for long ` +
+      `meetings so the agent is not paused mid-room for a "Continue?" click.`
+    );
+  }
   if (info.kind === 'antigravity') {
     return (
       ` PERSISTENCE NOTE (${info.label}): if a pasted Agent Room URL does not ` +

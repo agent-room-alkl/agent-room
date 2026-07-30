@@ -1,7 +1,7 @@
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { Buffer } from 'node:buffer';
-import { myRoleInTurn, summarizeBoard } from '@agent-room/upstash-client';
+import { buildRoomRetro, myRoleInTurn, summarizeBoard } from '@agent-room/upstash-client';
 import {
   createRoomApiClient,
   createRoom,
@@ -307,7 +307,7 @@ export function buildTaskBoardHint(board: TaskBoard | null, replyMode?: ReplyMod
     if (!taskBoardMode) return '';
     return '\n\nTASK BOARD — EMPTY. The humans in this room track progress ONLY through the task board; work assigned in chat prose is invisible to them. If you are assigning, accepting, or starting real work, put it on the board NOW: room_task action:"create" (title + owner + a different verifier + a concrete done-when), then action:"claim" before you start. The moderator/lead owns keeping this board populated.';
   }
-  const open = board.tasks.filter(t => t.state !== 'done').length;
+  const open = board.tasks.filter(t => t.state !== 'done' && t.state !== 'rejected').length;
   return `\n\nTASK BOARD — ${board.tasks.length} task(s), ${open} open. Work only on the task you've claimed and stay on the list; a task is "done" only when its verifier rules, not when you say so. If you're doing something not on the board, claim/ create a task for it first.\n${summarizeBoard(board)}`;
 }
 
@@ -615,7 +615,10 @@ export function registerTools(server: Server) {
     watchers.set(code, { stop: () => { running = false; } });
   }
 
-  const shouldAutoWatch = harness.kind === 'cursor';
+  // Copilot joins Cursor here: neither has a stop hook, and Copilot's
+  // chat.agent.maxRequests budget (default 25) makes listen-chaining a
+  // guaranteed drop-out — the background watcher is its only persistence.
+  const shouldAutoWatch = harness.kind === 'cursor' || harness.kind === 'copilot';
 
   // Tool profiles. `core` trims the surface to the nine tools a guest agent
   // actually needs (create/join/send/status/listen/read/minutes/leave/end),
@@ -714,13 +717,14 @@ export function registerTools(server: Server) {
       {
         name: 'room_minutes',
         description:
-          'Get the room topic, participants, and full transcript. export: true also publishes a permanent shareable report and returns its URL.',
+          'Get the room topic, participants, and full transcript. export: true also publishes a permanent shareable report and returns its URL. stats: true adds an auto-retrospective (task timelines, rejection/timeout counts, speaking distribution).',
         inputSchema: {
           type: 'object',
           required: ['code'],
           properties: {
             code: { type: 'string', description: 'Room code' },
             export: { type: 'boolean', description: 'Also publish a shareable report (default false)' },
+            stats: { type: 'boolean', description: 'Include the auto-retro stats block (default false)' },
           },
         },
       },
@@ -1043,6 +1047,10 @@ export function registerTools(server: Server) {
           roleBrief: roleBriefFor(a.role ?? ''),
           ...(updated.projectPrompt ? { projectPrompt: updated.projectPrompt, projectPromptVersion: updated.projectPromptVersion ?? 1 } : {}),
           ...(updated.projectMemoryContext ? { projectMemoryContext: updated.projectMemoryContext, projectId: updated.projectId, projectName: updated.projectName } : {}),
+          // Canonical shared context/policy (PRD §2.6) — identical to what
+          // hosted agents receive; prefer these over the raw fields above.
+          ...(updated.agentContext ? { agentContext: updated.agentContext } : {}),
+          ...(updated.roomPolicy ? { roomPolicy: updated.roomPolicy, policyVersion: updated.policyVersion } : {}),
           initialListenMs: listenMs,
           autoWatchStarted: !first.terminated && shouldAutoWatch,
           clientKind: harness.kind,
@@ -1072,6 +1080,8 @@ export function registerTools(server: Server) {
         roleBrief: roleBriefFor(a.role ?? ''),
         ...(updated.projectPrompt ? { projectPrompt: updated.projectPrompt, projectPromptVersion: updated.projectPromptVersion ?? 1 } : {}),
         ...(updated.projectMemoryContext ? { projectMemoryContext: updated.projectMemoryContext, projectId: updated.projectId, projectName: updated.projectName } : {}),
+        ...(updated.agentContext ? { agentContext: updated.agentContext } : {}),
+        ...(updated.roomPolicy ? { roomPolicy: updated.roomPolicy, policyVersion: updated.policyVersion } : {}),
         autoWatchStarted: shouldAutoWatch,
         clientKind: harness.kind,
         hint: muted
@@ -1438,10 +1448,16 @@ export function registerTools(server: Server) {
       const all = await listMessages(client, a.code, 0);
       const room = await getRoom(client, a.code);
       const FULL_TEXT_TAIL = 4;
+      let retro;
+      if (a.stats === true) {
+        const board = await getTaskBoard(client, a.code).catch(() => null);
+        retro = buildRoomRetro(room, all, board);
+      }
       return ok({
         topic: room.topic,
         participants: room.participants.map((p: Participant) => p.name),
         transcript: all.map((m: Message, i: number) => messageTranscriptLine(m, i >= all.length - FULL_TEXT_TAIL)).join('\n\n'),
+        ...(retro ? { retro } : {}),
       });
     }
 

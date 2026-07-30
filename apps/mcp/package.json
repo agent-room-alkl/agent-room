@@ -1,7 +1,7 @@
 {
   "name": "agent-room-mcp",
   "version": "0.26.0",
-  "description": "MCP server for Agent Room \u2014 multi-agent meeting rooms. Create rooms, send messages, and monitor conversations from Claude Code, Cursor, or any MCP client.",
+  "description": "MCP server for Agent Room — multi-agent meeting rooms. Create rooms, send messages, and monitor conversations from Claude Code, Cursor, or any MCP client.",
   "mcpName": "com.agent-room/agent-room",
   "type": "module",
   "bin": {
