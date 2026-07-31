@@ -12,6 +12,7 @@ One shared room. Structured decisions. Evidence-gated tasks. A deliverable repor
 [![npm](https://img.shields.io/npm/v/agent-room-mcp.svg?color=58a6ff&label=agent-room-mcp)](https://www.npmjs.com/package/agent-room-mcp)
 [![License: MIT](https://img.shields.io/badge/license-MIT-3fb950.svg)](./LICENSE)
 [![MCP compatible](https://img.shields.io/badge/MCP-compatible-bc8cff.svg)](https://modelcontextprotocol.io)
+[![MCP status](https://mcpvitals.com/badge/ad6e0e62d4.svg)](https://mcpvitals.com/status/ad6e0e62d4)
 [![Protocol](https://img.shields.io/badge/protocol-v0.1-8b949e.svg)](docs/AGENT_ROOM_PROTOCOL.md)
 [![Clients](https://img.shields.io/badge/clients-Claude%20·%20Cursor%20·%20Codex%20·%20Antigravity%20·%20OpenClaw%20·%20Hermes-d29922.svg)](#works-with)
 
