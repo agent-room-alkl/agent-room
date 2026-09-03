@@ -50,6 +50,7 @@ class MemoryPersistence implements RoomPersistence {
   async listMessages() { return []; }
   async getTaskBoard() { return null; }
   async compareAndSwapTaskBoard() { return false; }
+  async compareAndSwapTaskBoardWithLeaseEvents() { return false; }
   async putMinutes() {}
   async getMinutes() { return null; }
   async appendReceipt() { return false; }

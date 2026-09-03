@@ -5,3 +5,4 @@ export * from './redis.js';
 export * from './postgres.js';
 export * from './schema.js';
 export * from './member-auth.js';
+export * from './task-leases.js';

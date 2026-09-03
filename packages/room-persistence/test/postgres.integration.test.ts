@@ -7,6 +7,7 @@ import { PostgresRoomPersistence } from '../src/postgres.js';
 import { PersistenceSchemaError, type RoomReceipt } from '../src/types.js';
 import { proveImmutableRecordParity } from './parity-contract.js';
 import { AgentCardVerifier, AuthenticatedRoomJoinServer, signAgentCard } from '../src/member-auth.js';
+import { TaskLeaseServer } from '../src/task-leases.js';
 
 const databaseUrl = process.env.TEST_POSTGRES_URL;
 const describePostgres = databaseUrl ? describe : describe.skip;
@@ -179,4 +180,108 @@ describePostgres('Postgres durable room production entry', () => {
       await restarted.close();
     }
   });
+
+  it('atomically persists a task lease and its ledger event across restart', async () => {
+    vi.useRealTimers();
+    const server = await RoomRecordServer.fromEnvironment({
+      AGENT_ROOM_PERSISTENCE: 'postgres', DATABASE_URL: databaseUrl,
+    });
+    const actor = { memberId: 'fingerprint-lease-ci-a', name: 'Lease Agent A', client: 'cc' as const };
+    const contender = { memberId: 'fingerprint-lease-ci-b', name: 'Lease Agent B', client: 'cc' as const };
+    const participant = (member: typeof actor) => ({
+      name: member.name, initials: 'LA', color: '#789', role: 'builder', client: member.client,
+      joinedAt: 1, lastSeenAt: 1,
+      authenticatedIdentity: {
+        cardFingerprint: member.memberId, fleetId: 'fleet-ci', cardName: member.name,
+        scheme: 'oauth2' as const, keyId: 'key-ci', verifiedAt: 1,
+      },
+    });
+    const durableRoom: Room = {
+      ...room(), code: 'PGS-TSK-LES', version: 1,
+      participants: [participant(actor), participant(contender)],
+    };
+    const durableBoard: TaskBoard = { code: durableRoom.code, version: 1, tasks: [{
+      id: 'T-CI', title: 'Lease persistence', state: 'in_progress', createdBy: 'Host', createdAt: 1, updatedAt: 1,
+    }] };
+    await server.createRoom(durableRoom);
+    expect(await server.updateTaskBoard(durableRoom.code, null, durableBoard)).toBe(true);
+    const leases = new TaskLeaseServer(server, () => 100);
+    const race = await Promise.allSettled([
+      leases.claim(durableRoom.code, 'T-CI', actor),
+      leases.claim(durableRoom.code, 'T-CI', contender),
+    ]);
+    expect(race.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+    expect(race.filter(result => result.status === 'rejected')).toHaveLength(1);
+    const winner = race.find(result => result.status === 'fulfilled');
+    const winnerId = winner?.status === 'fulfilled' ? winner.value.task.lease?.holderId : undefined;
+    await server.close();
+
+    const restarted = await RoomRecordServer.fromEnvironment({
+      AGENT_ROOM_PERSISTENCE: 'postgres', DATABASE_URL: databaseUrl,
+    });
+    try {
+      expect((await restarted.getTaskBoard(durableRoom.code))?.tasks[0]?.lease)
+        .toMatchObject({ holderId: winnerId, status: 'active' });
+      expect((await restarted.listReceipts(durableRoom.code)).map(item => item.leaseEvent))
+        .toEqual(['granted']);
+    } finally {
+      await restarted.close();
+    }
+  });
+
+  it.each(['claim', 'handoff grant'] as const)(
+    'keeps Postgres %s membership atomic when the member leaves at commit', async operation => {
+      vi.useRealTimers();
+      const server = await RoomRecordServer.fromEnvironment({
+        AGENT_ROOM_PERSISTENCE: 'postgres', DATABASE_URL: databaseUrl,
+      });
+      const alice = { memberId: `pg-${operation}-alice`, name: 'Atomic Alice', client: 'cc' as const };
+      const bob = { memberId: `pg-${operation}-bob`, name: 'Atomic Bob', client: 'cc' as const };
+      const participant = (member: typeof alice) => ({
+        name: member.name, initials: 'AT', color: '#789', role: 'builder', client: member.client,
+        joinedAt: 1, lastSeenAt: 1, authenticatedIdentity: {
+          cardFingerprint: member.memberId, fleetId: 'fleet-ci', cardName: member.name,
+          scheme: 'oauth2' as const, keyId: 'key-ci', verifiedAt: 1,
+        },
+      });
+      const code = operation === 'claim' ? 'PGS-ATM-CLM' : 'PGS-ATM-HOF';
+      const durableRoom: Room = { ...room(), code, version: 1,
+        participants: [participant(alice), participant(bob)] };
+      const durableBoard: TaskBoard = { code, version: 1, tasks: [{
+        id: 'T-ATOMIC', title: 'Atomic membership', state: 'in_progress',
+        createdBy: 'Host', createdAt: 1, updatedAt: 1,
+      }] };
+      await server.createRoom(durableRoom);
+      expect(await server.updateTaskBoard(code, null, durableBoard)).toBe(true);
+      let nextId = 0;
+      const leases = new TaskLeaseServer(server, () => 100, () => `id-${operation}-${++nextId}`);
+      if (operation === 'handoff grant') {
+        await leases.claim(code, 'T-ATOMIC', alice);
+        await leases.requestHandoff(code, 'T-ATOMIC', bob);
+      }
+      const original = server.persistence.compareAndSwapTaskBoardWithLeaseEvents.bind(server.persistence);
+      let armed = true;
+      server.persistence.compareAndSwapTaskBoardWithLeaseEvents = async (...args) => {
+        if (armed) {
+          armed = false;
+          const current = (await server.getRoom(code))!;
+          const leaving = operation === 'claim' ? alice.name : bob.name;
+          expect(await server.updateRoom(code, current.version, { ...current, version: current.version + 1,
+            participants: current.participants.filter(item => item.name !== leaving) })).toBe(true);
+        }
+        return original(...args);
+      };
+      try {
+        await expect(operation === 'claim'
+          ? leases.claim(code, 'T-ATOMIC', alice)
+          : leases.grantHandoff(code, 'T-ATOMIC', alice))
+          .rejects.toMatchObject({ name: 'task_lease_authenticated_member_required' });
+        const saved = await server.getTaskBoard(code);
+        expect(saved?.tasks[0]?.lease?.holderId)
+          .not.toBe(operation === 'claim' ? alice.memberId : bob.memberId);
+      } finally {
+        await server.close();
+      }
+    },
+  );
 });
