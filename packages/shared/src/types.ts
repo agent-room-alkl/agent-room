@@ -1,5 +1,16 @@
 export type ClientKind = 'web' | 'cc';
 
+export type MemberAuthScheme = 'oauth2' | 'openIdConnect' | 'mTLS';
+
+export interface AuthenticatedMemberIdentity {
+  cardFingerprint: string;
+  fleetId: string;
+  cardName: string;
+  scheme: MemberAuthScheme;
+  keyId: string;
+  verifiedAt: number;
+}
+
 export interface Participant {
   name: string;
   role: string;          // empty string if not provided
@@ -13,6 +24,9 @@ export interface Participant {
   // existed (treated as legacy-approved). New joiners default to false until
   // the host (createdBy) approves them via approveParticipant.
   canSpeak?: boolean;
+  // Present only after a signed fleet Agent Card has been verified. This is
+  // part of the room document so every RoomPersistence adapter retains it.
+  authenticatedIdentity?: AuthenticatedMemberIdentity;
 }
 
 // How agent responses are coordinated in this room.
@@ -166,6 +180,8 @@ export interface Room {
   endedAt?: number;      // epoch ms — set when meeting ends
   version: number;       // for optimistic concurrency
   participants: Participant[];
+  // Omitted for legacy rooms. Authenticated joins must select one of these.
+  acceptedMemberAuthSchemes?: MemberAuthScheme[];
   // Hash of the secret returned to the host on createRoom. Anyone trying to
   // join with name === createdBy must present the matching secret, otherwise
   // they get HostNameTakenError. This stops trivial impersonation by anyone
