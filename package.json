@@ -9,6 +9,7 @@
   "scripts": {
     "test": "npm -ws run test --if-present",
     "build": "npm -ws run build --if-present",
+    "build:ordered": "npm run build -w packages/shared && npm run build -w packages/upstash-client && npm run build -w packages/room-persistence && npm run build -w apps/mcp && npm run build -w apps/web",
     "dev:web": "npm -w apps/web run dev"
   },
   "devDependencies": {
