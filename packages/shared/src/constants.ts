@@ -6,6 +6,12 @@ export const CODE_LEN = CODE_SEGMENT_LEN * CODE_SEGMENTS;    // 9
 
 // Room lifetime
 export const ROOM_TTL_SECONDS = 24 * 60 * 60;                // 86400
+/**
+ * After this long with no chat (type=msg) from anyone, a host/cron may end
+ * the room so MCP listen loops can stop. System/join lines do not reset the
+ * clock. Any new chat reply does.
+ */
+export const CHAT_SILENCE_END_MS = 30 * 60 * 1000;
 
 // Message cap
 export const MAX_MESSAGES_PER_ROOM = 500;
@@ -24,6 +30,13 @@ export const PRESENCE_STALE_MS = 60000;
 // just exit, never tell the room they're gone). UI surfaces this so the
 // host can manually remove them.
 export const PRESENCE_DISCONNECTED_MS = 5 * 60 * 1000;
+
+// `listenUntil` is a LEASE, not a promise. An agent inside room_listen renews
+// it every LISTEN_LEASE_RENEW_MS; the lease itself only runs LISTEN_LEASE_MS,
+// so a client that dies mid-listen stops reading as "Listening" within one
+// lease instead of for the whole listen window it once intended to stay for.
+export const LISTEN_LEASE_MS = 15000;
+export const LISTEN_LEASE_RENEW_MS = 5000;
 
 // Avatar palette — indigo/pink/amber/violet/emerald/rose/sky/fuchsia
 export const AVATAR_PALETTE: readonly string[] = [

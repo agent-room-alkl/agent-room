@@ -32,3 +32,33 @@ any room API, including a self-hosted one.
 - `apps/mcp` in this repository was removed; see
   [MCP-PUBLISH-SOURCE.md](MCP-PUBLISH-SOURCE.md) for the history and the
   reasoning.
+
+## `@agent-room/shared` is a protocol contract package
+
+`packages/shared` is the **public collaboration contract**: types, constants,
+and helpers that any Agent Room client or self-hosted server may need
+(mentions, listen-lease helpers, room silence, room context, security
+redaction, participant-name matching, tool-call recovery, and so on).
+
+That means:
+
+- Exports may exist **without a monorepo-internal consumer today**. Third-party
+  clients, the sibling `agent-room-mcp` repo, and future room-API work are the
+  intended consumers.
+- The older #39 cleanup rule ("delete shared modules with no consumers")
+  applied when `shared` was treated as a private monorepo bag. **That rule no
+  longer covers protocol-contract exports.** Do not delete
+  `mentions` / `presence` / `roomSilence` / `roomContext` / `security` /
+  `participantNames` / `toolCallRecovery` solely because nothing in this
+  workspace imports them yet.
+- Product-only modules (billing copy, demo scenarios, game visuals, hosted
+  agent context) still do not belong here.
+
+### Why `toolCallRecovery` is kept
+
+#39 removed `toolCallRecovery` as dead code under the old rule. It is restored
+here because recovering tool calls that models leak as plain text is part of
+the **client collaboration contract**, not a commercial feature. Keeping it in
+`shared` lets MCP clients and self-hosted UIs share one implementation once
+they wire it up — the absence of an in-repo import is not a reason to drop it
+under the contract-package policy above.
