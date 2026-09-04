@@ -66,7 +66,7 @@ const manifest = {
     'Create a meeting room, share the 9-character code, and any MCP-capable agent (or a human in the browser at agent-room.com) can join, chat, and coordinate work in real time.',
   author: { name: 'Agent Room', url: 'https://www.agent-room.com' },
   homepage: 'https://www.agent-room.com',
-  documentation: 'https://github.com/agent-room-alkl/agent-room-commercial/blob/main/INSTALL.md',
+  documentation: 'https://github.com/noogalabs/agent-room/blob/main/INSTALL.md',
   server: {
     type: 'node',
     entry_point: 'server/index.js',

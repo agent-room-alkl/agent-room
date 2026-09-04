@@ -1,4 +1,5 @@
-import { createRoomApiClient, getRoom, listMessages } from './roomApi.js';
+import { createRoomApiClient, getRoom, listMessages, RoomApiError, RoomNotFoundError } from './roomApi.js';
+import { credentialsFromState } from './credentials.js';
 import type { Message } from '@agent-room/shared';
 import {
   readState,
@@ -95,12 +96,67 @@ async function readHookState(scope: StateScope) {
   return scope === 'harness' ? readHarnessStateOrMerged() : readState();
 }
 
-async function fetchPending(scope: StateScope): Promise<PendingRoom[]> {
+export interface ActiveRoom { code: string; topic: string; selfName: string; cursor: number }
+
+/** Only a definitive "this room no longer exists" answer may evict a room from local state. */
+export function shouldDropRoomOnError(error: unknown, hasOwnCapability = false): boolean {
+  return error instanceof RoomNotFoundError ||
+    (hasOwnCapability && error instanceof RoomApiError && error.status === 403);
+}
+
+/**
+ * Best-effort cleanup at Stop: drop rooms from local state that are gone
+ * server-side (TTL expired), marked ended, or where this agent is no longer
+ * a participant, so a left-over entry cannot keep the Stop hook looping.
+ * Auth failures, DNS failures and timeouts are NOT evidence the room is gone:
+ * a brief room-API outage at Stop must not drop a live room and silence the
+ * agent, so those rows are retained and skipped this cycle.
+ */
+export async function pruneRoomsForStop(stateScope: StateScope): Promise<{ activeRooms: ActiveRoom[]; hadRetainedFailure: boolean }> {
+  const state = await readHookState(stateScope);
+  // Same snapshot rule as fetchPending: cleanup must never evaluate a room with missing capabilities.
+  const apiClient = createRoomApiClient({ loadCredentials: async (code) => credentialsFromState(state, code) });
+  const drop = async (code: string) => {
+    try {
+      if (stateScope === 'harness') await removeRoomEverywhere(code);
+      else await removeRoom(code);
+    } catch { /* non-essential */ }
+  };
+  const activeRooms: ActiveRoom[] = [];
+  let hadRetainedFailure = false;
+  for (const [code, r] of Object.entries(state.rooms)) {
+    try {
+      const room = await getRoom(apiClient, code);
+      const stillIn = room.participants.some(p => p.name === r.name && p.client === 'cc');
+      if (room.status !== 'active' || !stillIn) { await drop(code); continue; }
+      activeRooms.push({ code, topic: room.topic, selfName: r.name, cursor: r.cursor });
+    } catch (error) {
+      const hasOwnCapability = Boolean(r.accessToken && r.participantToken);
+      if (shouldDropRoomOnError(error, hasOwnCapability)) await drop(code);
+      else hadRetainedFailure = true;
+    }
+  }
+  return { activeRooms, hadRetainedFailure };
+}
+
+export async function pruneRooms(stateScope: StateScope): Promise<ActiveRoom[]> {
+  return (await pruneRoomsForStop(stateScope)).activeRooms;
+}
+
+export function shouldLongPollAfterPrune(result: { activeRooms: ActiveRoom[]; hadRetainedFailure: boolean }): boolean {
+  return result.activeRooms.length > 0 && !result.hadRetainedFailure;
+}
+
+export async function fetchPending(scope: StateScope): Promise<PendingRoom[]> {
   const state = await readHookState(scope);
   const codes = Object.keys(state.rooms);
   if (codes.length === 0) return [];
 
-  const client = createRoomApiClient();
+  // Credentials come from the SAME snapshot that enumerated the rooms. The
+  // hook process has its own PPID, so a PPID-scoped readState() can miss a
+  // room that only the harness-scoped file knows; the unauthenticated
+  // listMessages would then fail silently and cleanup could drop a live room.
+  const client = createRoomApiClient({ loadCredentials: async (code) => credentialsFromState(state, code) });
   const results: PendingRoom[] = [];
 
   for (const code of codes) {
@@ -157,7 +213,7 @@ function formatMessages(rooms: PendingRoom[]): string {
   return lines.join('\n');
 }
 
-async function commitCursors(rooms: PendingRoom[], scope: StateScope): Promise<void> {
+export async function commitCursors(rooms: PendingRoom[], scope: StateScope): Promise<void> {
   for (const r of rooms) {
     if (scope === 'harness') {
       await updateCursorEverywhere(r.code, r.newCursor);
@@ -187,8 +243,8 @@ async function readStdin(): Promise<HookInput> {
   });
 }
 
-export async function runHook(): Promise<void> {
-  const input = await readStdin();
+export async function runHook(inputOverride?: HookInput): Promise<void> {
+  const input = inputOverride ?? await readStdin();
   // Normalize the event name across clients. Cursor only fires the stop
   // hook (no UserPromptSubmit / SessionStart equivalent today). Older
   // Cursor hook docs/examples showed `{ status, loop_count }` without a
@@ -253,6 +309,7 @@ export async function runHook(): Promise<void> {
 
   let withMessages = pending.filter((r) => r.messages.length > 0);
   await commitCursors(pending, stateScope); // advance cursors even when only own-messages were skipped
+  let stopPrune: { activeRooms: ActiveRoom[]; hadRetainedFailure: boolean } | undefined;
 
   // Long-poll fallback (Fix A): on Stop, if there's any active room at all,
   // hold the turn open and watch for incoming messages. This used to fire
@@ -260,9 +317,9 @@ export async function runHook(): Promise<void> {
   // where a passively-listening agent would sleep instantly the moment its
   // turn ended — and any later web user reply would be missed.
   if (withMessages.length === 0 && event === 'Stop') {
-    const state = await readHookState(stateScope);
-    const hasActiveRoom = Object.keys(state.rooms).length > 0;
-    if (hasActiveRoom) {
+    try { stopPrune = await pruneRoomsForStop(stateScope); }
+    catch { stopPrune = { activeRooms: [], hadRetainedFailure: true }; }
+    if (shouldLongPollAfterPrune(stopPrune)) {
       const deadline = Date.now() + POLL_MAX_MS;
       // Ease 1.5s -> 5s across the window: the first replies usually land
       // fast; past ~10s of quiet, finer granularity is pure API load (this
@@ -308,36 +365,7 @@ export async function runHook(): Promise<void> {
   // cap up top (`stop_hook_active && streak >= MAX`), so reaching this
   // branch means we have budget for one more keep-alive nudge.
   if (withMessages.length === 0 && event === 'Stop') {
-    let activeRooms: Array<{ code: string; topic: string; selfName: string; cursor: number }> = [];
-    try {
-      const state = await readHookState(stateScope);
-      const apiClient = createRoomApiClient();
-      // Best-effort cleanup: drop rooms from local state that are gone
-      // server-side (TTL expired) or marked ended, or where this agent is
-      // no longer in the participants list. Without this, a left-over
-      // entry would keep the Stop hook looping "call room_listen" forever
-      // after the meeting closes — Codex caught this in 0.12.0 review.
-      for (const [code, r] of Object.entries(state.rooms)) {
-        try {
-          const room = await getRoom(apiClient, code);
-          const stillIn = room.participants.some(p => p.name === r.name && p.client === 'cc');
-          if (room.status !== 'active' || !stillIn) {
-            try {
-              if (stateScope === 'harness') await removeRoomEverywhere(code);
-              else await removeRoom(code);
-            } catch { /* non-essential */ }
-            continue;
-          }
-          activeRooms.push({ code, topic: room.topic, selfName: r.name, cursor: r.cursor });
-        } catch {
-          // Room not found / TTL expired — drop it from state too.
-          try {
-            if (stateScope === 'harness') await removeRoomEverywhere(code);
-            else await removeRoom(code);
-          } catch { /* non-essential */ }
-        }
-      }
-    } catch { /* fall through to plain exit */ }
+    const activeRooms = stopPrune?.activeRooms ?? [];
 
     if (activeRooms.length > 0) {
       try {

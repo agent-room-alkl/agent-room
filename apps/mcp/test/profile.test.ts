@@ -1,5 +1,5 @@
-// The consolidated tool surface: 7 core tools + 4 extras (task board, host
-// admin, watch, attachment reader) — with every pre-consolidation name still
+// The consolidated tool surface: 8 core tools + 3 extras (task board, host
+// admin, watch) — with every pre-consolidation name still
 // dispatching as a hidden alias, and AGENT_ROOM_PROFILE=core gating on the
 // canonical (listed) name so legacy core calls like room_status keep working.
 
@@ -42,14 +42,15 @@ describe('consolidated tool surface', () => {
     expect(names).not.toContain('room_list_messages');
   });
 
-  it('core profile lists exactly the 7 core tools', async () => {
+  it('core profile includes the authenticated attachment reader', async () => {
     process.env.AGENT_ROOM_PROFILE = 'core';
     const { server, handlers } = captureHandlers();
     registerTools(server);
     const { tools } = await handlers.get(ListToolsRequestSchema)!({});
     const names = tools.map((t: { name: string }) => t.name).sort();
     expect(names).toEqual([...CORE_PROFILE_TOOLS].sort());
-    expect(names).toHaveLength(7);
+    expect(names).toHaveLength(8);
+    expect(names).toContain('room_attachment_read');
   });
 
   it('core profile refuses full-only tools (and their aliases) with a hint', async () => {
