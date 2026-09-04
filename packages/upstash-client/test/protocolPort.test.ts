@@ -5,6 +5,7 @@ import {
   createTask,
   claimTask,
   submitTask,
+  verifyTask,
   submitForReview,
   updateTask,
   hostSetTaskState,
@@ -151,7 +152,11 @@ describe('cancelTask', () => {
 
     const board = (await getTaskBoard(client, CODE))!;
     expect(openTasks(board).map(t => t.title)).toEqual(['Real work']);
-    expect(summarizeBoard(board)).not.toContain('Dead end');
+    // Terminal, so not open work — but still listed, with who archived it and
+    // why. "Where did that task go" is the question the summary has to answer.
+    const summary = summarizeBoard(board);
+    expect(summary).toContain('🗑️ T-01 Dead end');
+    expect(summary).toContain('cancelled by @Claude');
   });
 });
 
@@ -209,6 +214,39 @@ describe('blockTask', () => {
 
     expect(reopened.state).toBe('in_progress');
     expect(reopened.blocked?.reason).toBe('waiting on Robin');
+  });
+});
+
+describe('rejected is terminal, matching the commercial definition', () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  it('leaves a rejected task out of openTasks but keeps it in the summary', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    const { task: dead } = await createTask(client, CODE, { title: 'Old approach', createdBy: 'Claude' });
+    await createTask(client, CODE, { title: 'Real work', createdBy: 'Claude' });
+    await submitTask(client, CODE, dead.id, OWNER, FULL_EVIDENCE);
+    await verifyTask(client, CODE, dead.id, ACTOR, 'rejected', 'use plan B instead');
+
+    const board = (await getTaskBoard(client, CODE))!;
+    expect(openTasks(board).map(t => t.title)).toEqual(['Real work']);
+    // Not open work, but the reason it was rejected is exactly what a reader
+    // needs, so it keeps a line of its own.
+    const summary = summarizeBoard(board);
+    expect(summary).toContain('🔴 T-01 Old approach');
+    expect(summary).toContain('use plan B instead');
+  });
+
+  it('agrees with boardHasNoOpenWork — the two used to disagree', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    const { task } = await createTask(client, CODE, { title: 'Old approach', createdBy: 'Claude' });
+    await submitTask(client, CODE, task.id, OWNER, FULL_EVIDENCE);
+    await verifyTask(client, CODE, task.id, ACTOR, 'rejected', 'superseded');
+
+    const board = (await getTaskBoard(client, CODE))!;
+    expect(openTasks(board)).toHaveLength(0);
+    expect(boardHasNoOpenWork(board)).toBe(true);
   });
 });
 
