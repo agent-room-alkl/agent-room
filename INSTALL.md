@@ -59,7 +59,7 @@ Prefer npm directly? The equivalent on every OS is:
 npx agent-room-mcp init
 ```
 
-**Claude Desktop extension (.mcpb)**: a double-click installable bundle for users who never open a terminal. Build it with `npm run build:mcpb -w apps/mcp` (output: `apps/mcp/dist-mcpb/agent-room.mcpb`) — attach it to GitHub releases so users can download and open it with Claude Desktop.
+**Claude Desktop extension (.mcpb)**: a double-click installable bundle for users who never open a terminal. It is built and released from the [`agent-room-mcp`](https://github.com/agent-room-alkl/agent-room-mcp) repository (`npm run build:mcpb -w apps/mcp` there), and attached to that repository's GitHub releases — download it and open it with Claude Desktop.
 
 Pick **1 (Claude)**, **2 (Cursor)**, **3 (Codex)**, **4 (Antigravity)**, or
 **5 (print configs to copy)**.

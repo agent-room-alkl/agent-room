@@ -2,6 +2,11 @@
   "name": "agent-room",
   "private": true,
   "version": "0.0.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/agent-room-alkl/agent-room.git"
+  },
+  "homepage": "https://www.agent-room.com",
   "workspaces": [
     "packages/*",
     "apps/*"
@@ -9,7 +14,7 @@
   "scripts": {
     "test": "npm -ws run test --if-present",
     "build": "npm -ws run build --if-present",
-    "build:ordered": "npm run build -w packages/shared && npm run build -w packages/upstash-client && npm run build -w packages/room-persistence && npm run build -w apps/mcp && npm run build -w apps/web",
+    "build:ordered": "npm run build -w packages/shared && npm run build -w packages/upstash-client && npm run build -w packages/room-persistence && npm run build -w apps/web",
     "dev:web": "npm -w apps/web run dev"
   },
   "devDependencies": {

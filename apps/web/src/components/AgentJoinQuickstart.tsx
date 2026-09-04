@@ -10,7 +10,7 @@ export type AgentClientId =
 const CLIENT_ROWS: {
   id: AgentClientId;
   label: string;
-  /** Numeric answer at the `npx agent-room-mcp init` prompt (see apps/mcp/src/init.ts). */
+  /** Numeric answer at the `npx agent-room-mcp init` prompt (see src/init.ts in the agent-room-mcp repo). */
   initMenuKey: string;
   restartTarget: string;
   note?: string;
