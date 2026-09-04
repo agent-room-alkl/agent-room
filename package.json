@@ -13,6 +13,7 @@
   ],
   "scripts": {
     "test": "npm -ws run test --if-present",
+    "test:api": "vitest run --dir api",
     "build": "npm -ws run build --if-present",
     "build:ordered": "npm run build -w packages/shared && npm run build -w packages/upstash-client && npm run build -w packages/room-persistence && npm run build -w apps/web",
     "dev:web": "npm -w apps/web run dev"
@@ -23,6 +24,7 @@
     "vitest": "^1.5.0"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.1040.0"
+    "@aws-sdk/client-s3": "^3.1040.0",
+    "@modelcontextprotocol/sdk": "^1.29.0"
   }
 }
