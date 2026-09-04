@@ -8,6 +8,7 @@ export * from './projectMemory.js';
 export * from './presence.js';
 export * from './toolCallRecovery.js';
 export * from './roomContext.js';
+export * from './roomPolicy.js';
 export * from './roomSilence.js';
 export * from './mentions.js';
 export * from './security.js';
