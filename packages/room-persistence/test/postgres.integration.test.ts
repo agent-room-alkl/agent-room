@@ -1,3 +1,4 @@
+import { generateKeyPairSync } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Message, Room, RoomReport, TaskBoard } from '@agent-room/shared';
 import { Pool } from 'pg';
@@ -5,6 +6,7 @@ import { RoomRecordServer } from '../src/server.js';
 import { PostgresRoomPersistence } from '../src/postgres.js';
 import { PersistenceSchemaError, type RoomReceipt } from '../src/types.js';
 import { proveImmutableRecordParity } from './parity-contract.js';
+import { AgentCardVerifier, AuthenticatedRoomJoinServer, signAgentCard } from '../src/member-auth.js';
 
 const databaseUrl = process.env.TEST_POSTGRES_URL;
 const describePostgres = databaseUrl ? describe : describe.skip;
@@ -138,6 +140,41 @@ describePostgres('Postgres durable room production entry', () => {
       expect(await restarted.listMessages(room().code, 0)).toEqual([message()]);
       expect(await restarted.getMinutes(room().code, 'minutes-1')).toEqual(report());
       expect(await restarted.listReceipts(room().code)).toHaveLength(6);
+    } finally {
+      await restarted.close();
+    }
+  });
+
+  it('retains an authenticated member binding across a Postgres server restart', async () => {
+    vi.useRealTimers();
+    const server = await RoomRecordServer.fromEnvironment({
+      AGENT_ROOM_PERSISTENCE: 'postgres', DATABASE_URL: databaseUrl,
+    });
+    const durableRoom: Room = {
+      ...room(), code: 'PGS-AUT-MEM', version: 1, participants: [],
+      acceptedMemberAuthSchemes: ['oauth2'],
+    };
+    const keys = generateKeyPairSync('ed25519');
+    const card = {
+      protocolVersion: '0.3.0', fleetId: 'fleet-ci', name: 'Builder',
+      url: 'https://agent.invalid/a2a', version: '1.0.0',
+      securitySchemes: { oauth2: { type: 'oauth2' } }, security: ['oauth2' as const],
+    };
+    await server.createRoom(durableRoom);
+    const joins = new AuthenticatedRoomJoinServer(server,
+      new AgentCardVerifier([{ fleetId: 'fleet-ci', keyId: 'key-ci', publicKey: keys.publicKey }]));
+    const participant = await joins.join(durableRoom.code, {
+      participant: { name: 'Builder', initials: 'BU', color: '#456', role: 'builder', client: 'cc' },
+      scheme: 'oauth2', signedCard: signAgentCard(card, 'key-ci', keys.privateKey),
+    });
+    await server.close();
+
+    const restarted = await RoomRecordServer.fromEnvironment({
+      AGENT_ROOM_PERSISTENCE: 'postgres', DATABASE_URL: databaseUrl,
+    });
+    try {
+      expect((await restarted.getRoom(durableRoom.code))?.participants).toEqual([participant]);
+      expect(participant.authenticatedIdentity?.fleetId).toBe('fleet-ci');
     } finally {
       await restarted.close();
     }
