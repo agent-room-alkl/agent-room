@@ -820,22 +820,28 @@ export function agentBlocks(board: TaskBoard, name: string): number {
   return board.reliability?.[name]?.blocks ?? 0;
 }
 
+/**
+ * Tasks that still need work — end-room guards, stall nudges, progress UI.
+ * `blocked` stays included: it is open work waiting on an external unblock.
+ * `rejected` is a terminal disposition (no further work unless explicitly
+ * reopened), so it is excluded alongside `done` and `cancelled`.
+ */
 export function openTasks(board: TaskBoard): Task[] {
-  return board.tasks.filter(t => t.state !== 'done' && t.state !== 'cancelled');
+  return board.tasks.filter(t => t.state !== 'done' && t.state !== 'rejected' && t.state !== 'cancelled');
 }
 
 /**
  * True when nothing actionable remains — every task is done, rejected or
- * cancelled. Distinct from allTasksDone, which is the stricter "everything was
- * verified done" test; a mixed done+rejected board has no open work but is not
- * all-done. Note this deliberately treats `rejected` as closed, matching the
- * commercial definition, while openTasks above keeps OSS's existing contract of
- * counting a rejected task as still open (a producer may retry it).
+ * cancelled. Used to stop periodic board review / prune the cron index without
+ * treating a mixed board as “all verified done” (that is allTasksDone).
+ *
+ * Derived from openTasks so the two can never disagree. They used to: this
+ * function called a rejected task closed while openTasks called it open, so a
+ * board with one reject could report "1 unfinished" and "nothing left to do"
+ * at the same time.
  */
 export function boardHasNoOpenWork(board: TaskBoard): boolean {
-  return board.tasks.every(
-    t => t.state === 'done' || t.state === 'rejected' || t.state === 'cancelled',
-  );
+  return openTasks(board).length === 0;
 }
 
 export function doneTasks(board: TaskBoard): Task[] {
@@ -885,16 +891,33 @@ export function summarizeBoard(board: TaskBoard): string {
   const icon: Record<TaskState, string> = {
     todo: '⬜', in_progress: '🔵', awaiting_review: '🟡', blocked: '🟠', done: '✅', rejected: '🔴', cancelled: '🗑️',
   };
-  const open = board.tasks.filter(t => t.state !== 'done' && t.state !== 'cancelled');
+  const open = openTasks(board);
+  const rejected = board.tasks.filter(t => t.state === 'rejected');
+  const cancelled = board.tasks.filter(t => t.state === 'cancelled');
   const doneCount = board.tasks.filter(t => t.state === 'done').length;
-  const lines = open.map((t) => {
-    // A blocked task is useless on the board without the reason it is stuck —
-    // that reason is the whole point of the state.
-    const blockedSuffix = t.state === 'blocked' && t.blocked?.reason?.trim()
-      ? `: ${t.blocked.reason.trim().slice(0, 80)}`
-      : '';
-    return `${icon[t.state]} ${t.id} ${t.title}${t.owner ? ` (@${t.owner})` : ''} — ${t.state}${blockedSuffix}`;
-  });
+  const lines = [
+    ...open.map((t) => {
+      // A blocked task is useless on the board without the reason it is stuck —
+      // that reason is the whole point of the state.
+      const blockedSuffix = t.state === 'blocked' && t.blocked?.reason?.trim()
+        ? `: ${t.blocked.reason.trim().slice(0, 80)}`
+        : '';
+      return `${icon[t.state]} ${t.id} ${t.title}${t.owner ? ` (@${t.owner})` : ''} — ${t.state}${blockedSuffix}`;
+    }),
+    // Terminal, so not open work — but still listed, because "why was this
+    // rejected / cancelled" is the part a reader actually needs.
+    ...rejected.map((t) => {
+      const note = t.verdict?.note?.trim();
+      const noteSuffix = note ? `: ${note.slice(0, 80)}` : '';
+      return `${icon.rejected} ${t.id} ${t.title}${t.owner ? ` (@${t.owner})` : ''} — rejected${noteSuffix}`;
+    }),
+    ...cancelled.map((t) => {
+      const reason = t.cancellation?.reason?.trim();
+      const reasonSuffix = reason ? `: ${reason.slice(0, 80)}` : '';
+      const by = t.cancellation?.by ? ` by @${t.cancellation.by}` : '';
+      return `${icon.cancelled} ${t.id} ${t.title}${t.owner ? ` (@${t.owner})` : ''} — cancelled${by}${reasonSuffix}`;
+    }),
+  ];
   if (doneCount > 0) lines.push(`✅ ${doneCount} done`);
   return lines.join('\n');
 }

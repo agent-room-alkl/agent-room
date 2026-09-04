@@ -338,7 +338,7 @@ export type TaskState =
   | 'awaiting_review'  // producer submitted evidence; verifier must rule
   | 'blocked'          // owner/host declared it stuck — see Task.blocked; open work
   | 'done'             // verifier confirmed the evidence
-  | 'rejected'         // verifier rejected; back to the producer
+  | 'rejected'         // verifier rejected; terminal until explicitly reopened
   | 'cancelled';       // participant archived it; terminal, visible history only
 
 // The three-part proof a producer must attach to move a task to
