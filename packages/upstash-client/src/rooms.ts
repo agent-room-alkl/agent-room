@@ -4,7 +4,7 @@ import type {
   ReplyMode,
   ReplyModeConfig,
 } from '@agent-room/shared';
-import { AVATAR_PALETTE, DEFAULT_TURN_TIMEOUTS_MS, ROOM_TTL_SECONDS } from '@agent-room/shared';
+import { AVATAR_PALETTE, DEFAULT_TURN_TIMEOUTS_MS, PRESENCE_DISCONNECTED_MS, ROOM_TTL_SECONDS } from '@agent-room/shared';
 import type { UpstashClient } from './client.js';
 import { RoomNotFoundError, ConcurrencyError } from './errors.js';
 
@@ -662,4 +662,20 @@ export async function setListenUntil(
       p.name === name ? { ...p, listenUntil: until, lastSeenAt: Date.now() } : p
     ),
   }));
+}
+
+/**
+ * Has this participant gone quiet long enough to count as disconnected?
+ *
+ * `listenUntil` is a lease an agent renews on every room_listen, so a seat
+ * holding a live lease is never stale even if lastSeenAt is momentarily old —
+ * the lease can only veto staleness, never assert it. Everything else falls
+ * back to the lastSeenAt clock, which is what actually decides abandonment.
+ */
+export function isParticipantStale(p: Participant, now: number = Date.now()): boolean {
+  if (typeof p.listenUntil === 'number' && Number.isFinite(p.listenUntil) && p.listenUntil >= now) {
+    return false;
+  }
+  const lastSeen = typeof p.lastSeenAt === 'number' && Number.isFinite(p.lastSeenAt) ? p.lastSeenAt : 0;
+  return now - lastSeen > PRESENCE_DISCONNECTED_MS;
 }
