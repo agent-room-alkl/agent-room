@@ -413,6 +413,63 @@ export async function reassignTaskRoles(
   return { board, task: updated! };
 }
 
+// 'cancelled' is terminal: an archived task must be reopened (updateTask) before
+// new work can be submitted against it. Without this guard, cancelling a task and
+// then submitting evidence would silently resurrect it into awaiting_review.
+function assertNotCancelled(task: Task): void {
+  if (task.state === 'cancelled') {
+    throw new TaskStateError(
+      `Task ${task.id} is cancelled — reopen it before submitting new evidence.`,
+    );
+  }
+}
+
+/** True when a task has submitted work that must be preserved until reopen. */
+function taskHasSubmittedEvidence(task: Task): boolean {
+  return !!(task.evidence || task.readinessNote?.trim());
+}
+
+// Participant archive: move a task to terminal 'cancelled' (visible history,
+// not open work). Safe only for tasks without submitted evidence — todo and
+// in_progress duplicates can be archived; done and evidence-backed tasks stay
+// locked. Authorization is the caller's job (any joined participant / host).
+export async function cancelTask(
+  client: UpstashClient,
+  code: string,
+  id: string,
+  actor: { name: string; client: ClientKind },
+  reason?: string,
+  now: number = Date.now(),
+): Promise<{ board: TaskBoard; task: Task }> {
+  let updated: Task;
+  const board = await casTaskBoard(client, code, (current) => {
+    const task = findTask(current, id);
+    if (task.state === 'done') throw new TaskDoneImmutableError(id);
+    if (task.state === 'cancelled') {
+      throw new TaskStateError(`Task ${id} is already cancelled.`);
+    }
+    if (taskHasSubmittedEvidence(task)) {
+      throw new TaskStateError(
+        `Task ${id} has submitted evidence — reopen it to todo/in_progress before cancelling.`,
+      );
+    }
+    const cleanReason = reason?.trim();
+    updated = {
+      ...task,
+      state: 'cancelled',
+      cancellation: {
+        by: actor.name,
+        byClient: actor.client,
+        at: now,
+        ...(cleanReason ? { reason: cleanReason } : {}),
+      },
+      updatedAt: now,
+    };
+    return { ...replaceTask(current, updated), lastProgressAt: now };
+  });
+  return { board, task: updated! };
+}
+
 function assertEvidenceComplete(e: Partial<TaskEvidence>): void {
   if (!e.fileListing || !e.fileListing.trim()) throw new EvidenceIncompleteError('fileListing is empty');
   if (!e.fileExcerpt || !e.fileExcerpt.trim()) throw new EvidenceIncompleteError('fileExcerpt is empty');
@@ -438,6 +495,7 @@ export async function submitTask(
   let updated: Task;
   const board = await casTaskBoard(client, code, (current) => {
     const task = findTask(current, id);
+    assertNotCancelled(task);
     const fullEvidence: TaskEvidence = {
       fileListing: evidence.fileListing,
       fileExcerpt: evidence.fileExcerpt,
@@ -479,6 +537,7 @@ export async function submitForReview(
   let updated: Task;
   const board = await casTaskBoard(client, code, (current) => {
     const task = findTask(current, id);
+    assertNotCancelled(task);
     updated = {
       ...task,
       owner: task.owner ?? submitter.name,
@@ -580,6 +639,39 @@ export async function updateTask(
   return { board, task: updated! };
 }
 
+// Owner/host declares a task cannot proceed — missing deploy/access rights,
+// missing input files, or a spec still ambiguous after one clarification.
+// `blocked` stays OPEN work (it counts for end-room guards and shows on the
+// board), and it is NOT a completion claim, so there is no verifier gate.
+// Ownership enforcement lives at the marker/tool layer; reopen via updateTask
+// once the blocker is gone.
+export async function blockTask(
+  client: UpstashClient,
+  code: string,
+  id: string,
+  by: { name: string; client: ClientKind },
+  reason: string,
+  now: number = Date.now(),
+): Promise<{ board: TaskBoard; task: Task }> {
+  const clean = reason.trim();
+  if (!clean) throw new TaskStateError('A reason is required to block a task — say exactly what is missing.');
+  let updated: Task;
+  const board = await casTaskBoard(client, code, (current) => {
+    const task = findTask(current, id);
+    if (task.state !== 'todo' && task.state !== 'in_progress') {
+      throw new TaskStateError(`Task ${id} is '${task.state}' — only todo / in_progress tasks can be blocked.`);
+    }
+    updated = {
+      ...task,
+      state: 'blocked',
+      blocked: { by: by.name, byClient: by.client, at: now, reason: clean },
+      updatedAt: now,
+    };
+    return { ...replaceTask(current, updated), lastProgressAt: now };
+  });
+  return { board, task: updated! };
+}
+
 export class TaskDoneImmutableError extends UpstashError {
   constructor(id: string) {
     super(`Task ${id} is 'done' — completed tasks are locked and cannot be changed.`);
@@ -606,7 +698,7 @@ export async function hostSetTaskState(
   let updated: Task;
   const board = await casTaskBoard(client, code, (current) => {
     const task = findTask(current, id);
-    if (task.state === 'done') throw new TaskDoneImmutableError(id);
+    if (task.state === 'done' || task.state === 'cancelled') throw new TaskDoneImmutableError(id);
     if (task.state === state) return current;
     updated = {
       ...task,
@@ -729,7 +821,21 @@ export function agentBlocks(board: TaskBoard, name: string): number {
 }
 
 export function openTasks(board: TaskBoard): Task[] {
-  return board.tasks.filter(t => t.state !== 'done');
+  return board.tasks.filter(t => t.state !== 'done' && t.state !== 'cancelled');
+}
+
+/**
+ * True when nothing actionable remains — every task is done, rejected or
+ * cancelled. Distinct from allTasksDone, which is the stricter "everything was
+ * verified done" test; a mixed done+rejected board has no open work but is not
+ * all-done. Note this deliberately treats `rejected` as closed, matching the
+ * commercial definition, while openTasks above keeps OSS's existing contract of
+ * counting a rejected task as still open (a producer may retry it).
+ */
+export function boardHasNoOpenWork(board: TaskBoard): boolean {
+  return board.tasks.every(
+    t => t.state === 'done' || t.state === 'rejected' || t.state === 'cancelled',
+  );
 }
 
 export function doneTasks(board: TaskBoard): Task[] {
@@ -777,13 +883,18 @@ export function boardDeliveredSection(board: TaskBoard | null | undefined): stri
 // each; verified-done tasks collapse to a single trailing "✅ N done" line.
 export function summarizeBoard(board: TaskBoard): string {
   const icon: Record<TaskState, string> = {
-    todo: '⬜', in_progress: '🔵', awaiting_review: '🟡', done: '✅', rejected: '🔴',
+    todo: '⬜', in_progress: '🔵', awaiting_review: '🟡', blocked: '🟠', done: '✅', rejected: '🔴', cancelled: '🗑️',
   };
-  const open = board.tasks.filter(t => t.state !== 'done');
-  const doneCount = board.tasks.length - open.length;
-  const lines = open.map(
-    t => `${icon[t.state]} ${t.id} ${t.title}${t.owner ? ` (@${t.owner})` : ''} — ${t.state}`,
-  );
+  const open = board.tasks.filter(t => t.state !== 'done' && t.state !== 'cancelled');
+  const doneCount = board.tasks.filter(t => t.state === 'done').length;
+  const lines = open.map((t) => {
+    // A blocked task is useless on the board without the reason it is stuck —
+    // that reason is the whole point of the state.
+    const blockedSuffix = t.state === 'blocked' && t.blocked?.reason?.trim()
+      ? `: ${t.blocked.reason.trim().slice(0, 80)}`
+      : '';
+    return `${icon[t.state]} ${t.id} ${t.title}${t.owner ? ` (@${t.owner})` : ''} — ${t.state}${blockedSuffix}`;
+  });
   if (doneCount > 0) lines.push(`✅ ${doneCount} done`);
   return lines.join('\n');
 }

@@ -336,8 +336,10 @@ export type TaskState =
   | 'todo'             // created, nobody working it yet
   | 'in_progress'      // a producer claimed it
   | 'awaiting_review'  // producer submitted evidence; verifier must rule
+  | 'blocked'          // owner/host declared it stuck — see Task.blocked; open work
   | 'done'             // verifier confirmed the evidence
-  | 'rejected';        // verifier rejected; back to the producer
+  | 'rejected'         // verifier rejected; back to the producer
+  | 'cancelled';       // participant archived it; terminal, visible history only
 
 // The three-part proof a producer must attach to move a task to
 // 'awaiting_review'. All three text fields must be non-empty.
@@ -357,6 +359,28 @@ export interface TaskVerdict {
   by: string;            // verifier display name
   byClient: ClientKind;
   at: number;            // epoch ms
+}
+
+// Archive record written when a task is moved to 'cancelled'. Cancelling is
+// deliberately NOT a verdict: it says the task should never have been open,
+// not that it was judged. Only tasks without submitted evidence can be
+// cancelled (see cancelTask), so this never destroys a delivery record.
+export interface TaskCancellation {
+  by: string;
+  byClient: ClientKind;
+  at: number;            // epoch ms
+  reason?: string;
+}
+
+// Owner/host declaration that a task cannot proceed — missing deploy/access
+// rights, missing input files, or a spec still ambiguous after one
+// clarification. NOT a completion claim, so no verifier gate; the record is
+// kept (latest wins) even after a reopen, as history.
+export interface TaskBlock {
+  by: string;
+  byClient: ClientKind;
+  at: number;            // epoch ms
+  reason: string;        // what exactly is missing — required
 }
 
 // A lightweight checklist item under a Task. Subtasks are intentionally NOT
@@ -428,6 +452,8 @@ export interface Task {
   readinessNote?: string;
   evidence?: TaskEvidence; // latest submitted evidence (kept across rejects)
   verdict?: TaskVerdict;   // latest verifier ruling
+  cancellation?: TaskCancellation; // set when archived to 'cancelled'
+  blocked?: TaskBlock;     // latest block declaration (kept after reopen as history)
   // Audit trail of owner/verifier reassignments (host / moderator escape
   // hatch). Optional + append-only, so boards created before this field
   // existed keep working unchanged.

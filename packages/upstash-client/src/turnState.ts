@@ -1077,3 +1077,36 @@ export function myRoleInTurn(
   }
   return 'observer';
 }
+
+// Is this sender the room's configured Moderator? Identity comes from the
+// room config (modeConfig), NOT from turn state — the Moderator is still the
+// Moderator between turns, and turn state is wiped outright on every mode
+// switch. Callers that need "does the Moderator hold the floor right now"
+// want the turn-state helpers instead.
+export function isConfiguredModerator(
+  room: Room,
+  name: string,
+  client: ClientKind,
+): boolean {
+  const wantName = room.modeConfig?.moderatorAgentName;
+  if (!wantName || wantName !== name) return false;
+  const wantClient = room.modeConfig?.moderatorAgentClient;
+  // moderatorAgentClient is required by setReplyMode, but older rooms may
+  // carry only the name — fall back to name-only.
+  return wantClient === undefined || wantClient === client;
+}
+
+// Is the room's configured Moderator actually IN the room and able to speak?
+// When this is false the room is in moderator mode in name only: no moderator
+// turn can ever open, so nothing can hold the floor and every agent reply is
+// off-floor traffic.
+export function isModeratorPresent(room: Room): boolean {
+  const wantName = room.modeConfig?.moderatorAgentName;
+  if (!wantName) return false;
+  const wantClient = room.modeConfig?.moderatorAgentClient;
+  return room.participants.some(p =>
+    p.name === wantName
+    && (wantClient === undefined || p.client === wantClient)
+    && p.canSpeak !== false,
+  );
+}

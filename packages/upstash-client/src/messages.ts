@@ -396,3 +396,13 @@ export async function listMessages(
     return m;
   });
 }
+
+/**
+ * Status-ping body posted after a task submit in turn-taking rooms. Kept here
+ * (not at the call site) so every client emits the same recognisable prefix —
+ * the room UI and the minutes digest both key off `[STATUS]`.
+ */
+export function buildTaskSubmitStatusText(taskId: string, evidenceSummary: string): string {
+  const summary = evidenceSummary.trim().replace(/\s+/g, ' ').slice(0, 180);
+  return `[STATUS] 待审核 / awaiting_review ${taskId}: ${summary || '(no run output)'}`;
+}
