@@ -3,7 +3,8 @@ import { Link } from 'react-router-dom';
 import { TopNav } from '../components/TopNav.js';
 import { copyText } from '../lib/copy.js';
 
-const GITHUB_URL = 'https://github.com/ebin198351-akl/agent-room';
+const GITHUB_URL = 'https://github.com/agent-room-alkl/agent-room';
+const MCP_REPO_URL = 'https://github.com/agent-room-alkl/agent-room-mcp';
 const INSTALL_MD_URL = `${GITHUB_URL}/blob/main/INSTALL.md`;
 const NPM_URL = 'https://www.npmjs.com/package/agent-room-mcp';
 
@@ -20,9 +21,8 @@ const MCP_JSON = `{
 }`;
 
 // Grouped reference of every tool the MCP server exposes. Names must stay in
-// sync with apps/mcp/src/tools.ts — this page is the public contract.
-// Grouped reference of every tool the MCP server exposes. Names must stay in
-// sync with apps/mcp/src/tools.ts — this page is the public contract.
+// sync with apps/mcp/src/tools.ts in the agent-room-mcp repo — that is the
+// published implementation, and this page is the public contract.
 // (Pre-consolidation names like room_status / room_set_mode still work as
 // hidden aliases, but this is the surface new agents see.)
 const TOOL_GROUPS: Array<{ title: string; blurb: string; tools: Array<[string, string]> }> = [
@@ -217,7 +217,7 @@ export function McpTools() {
           <p className="mt-3 max-w-2xl text-base leading-relaxed text-ink-soft">
             Everything below is defined in{' '}
             <a
-              href={`${GITHUB_URL}/blob/main/apps/mcp/src/tools.ts`}
+              href={`${MCP_REPO_URL}/blob/main/apps/mcp/src/tools.ts`}
               target="_blank"
               rel="noreferrer"
               className="font-mono text-[13px] font-semibold text-accent hover:text-accent-deep"

@@ -43,12 +43,12 @@ If you come back to harden this into production, this file is the starting check
 ## 7. `room_minutes` tool does not return cached minutes
 
 - **Spec §10.2:** tool "returns the cached minutes, or the full history if no cache exists"
-- **Reality:** `apps/mcp/src/tools.ts` always returns the raw transcript plus topic and participant list — never reads `room-min:{code}`.
+- **Reality:** `apps/mcp/src/tools.ts` (now in the agent-room-mcp repo) always returns the raw transcript plus topic and participant list — never reads `room-min:{code}`.
 - **Why shipped:** The spec's "cached minutes" semantics assume the MCP server invokes AI. In the implemented design the user's own agent summarizes the transcript directly, so caching on the MCP side would be redundant. The web app also asks agents via prompt chips and no longer caches generated minutes. The tool description in `tools.ts` accurately describes the actual behavior; only the spec framing is stale.
 
 ## 8. `any` cast in MCP tool dispatch
 
-- **Location:** `apps/mcp/src/tools.ts` — `const a = (args ?? {}) as Record<string, any>`
+- **Location:** `apps/mcp/src/tools.ts` (now in the agent-room-mcp repo) — `const a = (args ?? {}) as Record<string, any>`
 - **Why shipped:** The MCP SDK exposes `arguments` as `unknown` at the type level. A properly-typed per-tool interface would eliminate the cast. Worth doing when the tool set grows; MVP has 6 tools and they're all covered by the inputSchema declarations.
 
 ## 9. Toast.tsx dynamic-import warning at Vite build

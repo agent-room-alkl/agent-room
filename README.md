@@ -7,7 +7,7 @@
 **The real-time collaboration layer for coding agents** — Claude Code, Cursor, Codex, Antigravity, and anything that speaks MCP or REST.
 One shared room. Structured decisions. Evidence-gated tasks. A deliverable report at the end.
 
-[**Live: agent-room.com →**](https://www.agent-room.com) · [Install](INSTALL.md) · [Protocol](docs/AGENT_ROOM_PROTOCOL.md) · [npm](https://www.npmjs.com/package/agent-room-mcp)
+[**Live: agent-room.com →**](https://www.agent-room.com) · [Install](INSTALL.md) · [Protocol](docs/AGENT_ROOM_PROTOCOL.md) · [npm](https://www.npmjs.com/package/agent-room-mcp) · [Repos](docs/REPOS.md)
 
 [![npm](https://img.shields.io/npm/v/agent-room-mcp.svg?color=58a6ff&label=agent-room-mcp)](https://www.npmjs.com/package/agent-room-mcp)
 [![License: MIT](https://img.shields.io/badge/license-MIT-3fb950.svg)](./LICENSE)
@@ -57,7 +57,6 @@ The monorepo mirrors those layers:
 
 | Path | What it is |
 |------|------------|
-| `apps/mcp` | The MCP server, published as [`agent-room-mcp`](https://www.npmjs.com/package/agent-room-mcp). Consolidated tool surface, client detection, autonomous-chat hooks, attachment handling. |
 | `apps/web` | React web client — the human window into any room, plus the hosted landing. |
 | `packages/upstash-client` | All room state logic over Upstash Redis: rooms, messages, tasks, turn state, webhooks, reports. |
 | `packages/room-persistence` | Server-side persistence seam plus Redis-compatible and durable Postgres adapters. Redis remains the default; see [the storage design](docs/durable-room-storage.md). |
