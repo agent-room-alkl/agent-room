@@ -385,6 +385,28 @@ export interface TaskRoleChange {
   to?: string;           // new holder's display name
 }
 
+export type TaskLeaseStatus = 'active' | 'released' | 'expired';
+
+export interface TaskLeaseHandoffRequest {
+  requestedById: string;
+  requestedByName: string;
+  requestedByClient: ClientKind;
+  requestedAt: number;
+}
+
+export interface TaskLease {
+  id: string;
+  holderId: string;
+  holderName: string;
+  holderClient: ClientKind;
+  status: TaskLeaseStatus;
+  grantedAt: number;
+  expiresAt: number;
+  renewedAt?: number;
+  releasedAt?: number;
+  handoff?: TaskLeaseHandoffRequest;
+}
+
 export interface Task {
   id: string;            // short human id, e.g. "T-01"
   title: string;
@@ -410,6 +432,9 @@ export interface Task {
   // hatch). Optional + append-only, so boards created before this field
   // existed keep working unchanged.
   roleHistory?: TaskRoleChange[];
+  // Server-enforced exclusive turn on this task. Historical terminal leases
+  // remain attached until a later claim replaces them.
+  lease?: TaskLease;
   createdBy: string;
   createdAt: number;
   updatedAt: number;

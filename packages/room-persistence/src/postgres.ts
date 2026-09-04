@@ -1,7 +1,7 @@
 import type { Message, Room, RoomReport, TaskBoard } from '@agent-room/shared';
 import { Pool, type PoolClient, type PoolConfig, type QueryResult } from 'pg';
 import { POSTGRES_SCHEMA_SQL } from './schema.js';
-import { PersistenceSchemaError, type LeaseEventInput, type RoomPersistence, type RoomReceipt } from './types.js';
+import { PersistenceSchemaError, type LeaseEventInput, type LeaseMembershipPrecondition, type RoomPersistence, type RoomReceipt } from './types.js';
 import { sameJson } from './json.js';
 
 const REQUIRED_SCHEMA_VERSION = 1;
@@ -162,6 +162,60 @@ export class PostgresRoomPersistence implements RoomPersistence {
       [code, expectedVersion, next.version, JSON.stringify(next), Date.now()],
     );
     return count(updated) === 1;
+  }
+
+  async compareAndSwapTaskBoardWithLeaseEvents(
+    code: string,
+    expectedVersion: number | null,
+    next: TaskBoard,
+    events: readonly LeaseEventInput[],
+    membership?: LeaseMembershipPrecondition,
+  ): Promise<boolean> {
+    return this.transaction(async client => {
+      if (membership) {
+        const locked = await client.query<{ version: number; status: string; room_json: unknown }>(
+          'SELECT version, status, room_json FROM agent_room_rooms WHERE code = $1 FOR UPDATE', [code],
+        );
+        const row = locked.rows[0];
+        const room = row ? value<Room>(row.room_json) : null;
+        const membersPresent = room?.status === 'active' && Number(row?.version) === membership.roomVersion &&
+          membership.members.every(required => room.participants.some(participant =>
+            participant.authenticatedIdentity?.cardFingerprint === required.memberId &&
+            participant.name === required.name && participant.client === required.client));
+        if (!membersPresent) return false;
+      }
+      let changed: QueryResult;
+      if (expectedVersion === null) {
+        changed = await client.query(
+          `INSERT INTO agent_room_task_boards (room_code, version, board_json, updated_at)
+           VALUES ($1, $2, $3::jsonb, $4)
+           ON CONFLICT (room_code) DO NOTHING`,
+          [code, next.version, JSON.stringify(next), Date.now()],
+        );
+      } else {
+        changed = await client.query(
+          `UPDATE agent_room_task_boards
+              SET version = $3, board_json = $4::jsonb, updated_at = $5
+            WHERE room_code = $1 AND version = $2`,
+          [code, expectedVersion, next.version, JSON.stringify(next), Date.now()],
+        );
+      }
+      if (count(changed) !== 1) return false;
+      for (const event of events) {
+        const receipt: RoomReceipt = {
+          id: event.id, roomCode: event.roomCode, kind: 'lease_event', createdAt: event.at,
+          leaseEvent: event.event,
+          payload: { actor: event.actor, leaseId: event.leaseId, ...(event.details ?? {}) },
+        };
+        await client.query(
+          `INSERT INTO agent_room_receipts
+            (room_code, receipt_id, receipt_kind, lease_event, receipt_json, created_at)
+           VALUES ($1, $2, 'lease_event', $3, $4::jsonb, $5)`,
+          [code, receipt.id, event.event, JSON.stringify(receipt), event.at],
+        );
+      }
+      return true;
+    });
   }
 
   async putMinutes(code: string, reportId: string, report: RoomReport): Promise<void> {
