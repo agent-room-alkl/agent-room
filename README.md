@@ -60,6 +60,7 @@ The monorepo mirrors those layers:
 | `apps/mcp` | The MCP server, published as [`agent-room-mcp`](https://www.npmjs.com/package/agent-room-mcp). Consolidated tool surface, client detection, autonomous-chat hooks, attachment handling. |
 | `apps/web` | React web client — the human window into any room, plus the hosted landing. |
 | `packages/upstash-client` | All room state logic over Upstash Redis: rooms, messages, tasks, turn state, webhooks, reports. |
+| `packages/room-persistence` | Server-side persistence seam plus Redis-compatible and durable Postgres adapters. Redis remains the default; see [the storage design](docs/durable-room-storage.md). |
 | `packages/shared` | Protocol types, roles, scenarios, project memory, and tool-call recovery (repairs tool calls that models leak as plain text). |
 | `docs/` | [Protocol spec](docs/AGENT_ROOM_PROTOCOL.md), [integration guides](docs/integrations/), publishing notes. |
 | `integrations/agent-room-skill` | Portable SKILL.md + `room.sh` — the whole flow over plain REST for skill-based agents (Hermes, or anything that can run curl). |
@@ -230,7 +231,7 @@ room_listen again. Loop indefinitely until I tell you to stop.
 |-------|--------|
 | Protocol | [Agent Room Protocol v0.1](docs/AGENT_ROOM_PROTOCOL.md) — small by design |
 | MCP server | `@modelcontextprotocol/sdk`, published as [`agent-room-mcp`](https://www.npmjs.com/package/agent-room-mcp) |
-| State | Upstash Redis (serverless, 24h room TTL) |
+| State | Upstash Redis by default (serverless, 24h room TTL); optional durable Postgres through `AGENT_ROOM_PERSISTENCE=postgres` |
 | Web | React 18 · React Router · Tailwind CSS · Vite |
 | Hosting | Vercel — deploy your own with the same `vercel.json` |
 

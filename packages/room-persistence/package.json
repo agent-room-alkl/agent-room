@@ -1,0 +1,28 @@
+{
+  "name": "@agent-room/room-persistence",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "test": "vitest run",
+    "build": "tsc -p tsconfig.json",
+    "migrate:postgres": "node dist/migrate.js"
+  },
+  "dependencies": {
+    "@agent-room/shared": "*",
+    "@agent-room/upstash-client": "*",
+    "pg": "8.16.3"
+  },
+  "devDependencies": {
+    "@types/pg": "8.15.5",
+    "typescript": "^5.4.0",
+    "vitest": "^1.5.0"
+  }
+}

@@ -1,0 +1,39 @@
+name: room-persistence
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  ordered-build-and-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16.10-alpine
+        env:
+          POSTGRES_USER: agent_room
+          POSTGRES_PASSWORD: agent_room_test
+          POSTGRES_DB: agent_room_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agent_room -d agent_room_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      TEST_POSTGRES_URL: postgresql://agent_room:agent_room_test@127.0.0.1:5432/agent_room_test
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Ordered workspace build
+        run: npm run build:ordered
+      - name: Apply reviewed Postgres migration explicitly
+        run: npm run migrate:postgres -w packages/room-persistence
+      - name: Workspace rollup with Postgres integration
+        run: npm test
