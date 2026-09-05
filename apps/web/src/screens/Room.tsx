@@ -1,13 +1,15 @@
 import { useRef, useState, useEffect, useCallback, type ClipboardEvent, type DragEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useRoom } from '../hooks/useRoom.js';
+import { useTaskBoard } from '../hooks/useTaskBoard.js';
 import { Bubble } from '../components/Bubble.js';
+import { TaskBoard, canRuleOn } from '../components/TaskBoard.js';
 import { VoiceButton } from '../components/VoiceButton.js';
 import { MeetingCodePill } from '../components/MeetingCodePill.js';
 import { Avatar } from '../components/Avatar.js';
 import { AgentRoomLogo } from '../components/AgentRoomLogo.js';
 import { colorForName, initialsFor } from '../lib/colors.js';
-import { PRESENCE_STALE_MS, PRESENCE_DISCONNECTED_MS, artifactLabel, extractArtifacts, type ArtifactKind, type Message, type MessageAttachment, type Participant, type ReplyMode, type ReplyModeConfig, type RoomArtifact, type SystemEventType } from '@agent-room/shared';
+import { PRESENCE_STALE_MS, PRESENCE_DISCONNECTED_MS, extractArtifacts, type Message, type MessageAttachment, type Participant, type ReplyMode, type ReplyModeConfig, type SystemEventType } from '@agent-room/shared';
 import { appendSystemMessage, directInvoke, getTurnState, hostSkipCurrent, setMuted, setReplyMode, createClient, createRoomReport, endRoom as endRoomApi, reactivateRoom as reactivateRoomApi, removeParticipant, type TurnState } from '@agent-room/upstash-client';
 import { ENV } from '../env.js';
 import { copyText } from '../lib/copy.js';
@@ -286,9 +288,18 @@ export function Room() {
     }
   }
 
-  const [mobilePanel, setMobilePanel] = useState<'chat' | 'people' | 'outputs'>('chat');
+  const [mobilePanel, setMobilePanel] = useState<'chat' | 'tasks' | 'people'>('chat');
   const [reportBusy, setReportBusy] = useState(false);
   const artifacts = extractArtifacts(messages);
+  // Board lives here, not inside TaskBoard, so the tab strip can badge how
+  // many deliveries are waiting on a ruling while the user is on Chat.
+  const taskBoard = useTaskBoard(code);
+  const openTaskCount = taskBoard.board?.tasks.filter(
+    t => t.state !== 'done' && t.state !== 'rejected' && t.state !== 'cancelled',
+  ).length ?? 0;
+  const reviewTaskCount = taskBoard.board?.tasks.filter(
+    t => canRuleOn(t, { name: self?.name ?? '', client: 'web' }, ended),
+  ).length ?? 0;
 
   async function handleExportReport() {
     if (!room) return;
@@ -660,19 +671,27 @@ export function Room() {
   }
 
   return (
-    <div className="h-full flex items-center justify-center px-3 py-4">
-      <div className="w-full max-w-7xl h-[88vh] grid grid-rows-[auto_auto_1fr] bg-surface border border-border rounded-xl shadow-card overflow-hidden">
-        <header className="px-4 py-3 border-b border-border-faint flex justify-between items-center bg-surface">
-          <div className="min-w-0 flex items-center gap-3">
-            <AgentRoomLogo showWordmark={false} markClassName="h-8 w-8" />
+    <div className="h-full flex items-center justify-center p-0 sm:px-3 sm:py-4">
+      <div className="w-full max-w-7xl h-full sm:h-[88vh] grid grid-rows-[auto_auto_1fr] bg-surface border-0 sm:border border-border rounded-none sm:rounded-xl shadow-none sm:shadow-card overflow-hidden">
+        <header className="px-3.5 py-2.5 sm:px-4 sm:py-3 border-b border-border-faint flex justify-between items-center bg-surface shrink-0">
+          <div className="min-w-0 flex items-center gap-2.5 sm:gap-3">
+            <AgentRoomLogo showWordmark={false} markClassName="h-7 w-7 sm:h-8 sm:w-8" />
             <div className="min-w-0">
-              <div className="text-sm font-semibold truncate">{room.topic}</div>
-              <div className="text-[10px] text-ink-soft">
-                {ended ? <span className="text-red-500 font-semibold">Meeting ended</span> : `${room.participants.length} participants`}
+              <div className="text-xs sm:text-sm font-semibold truncate text-ink">{room.topic}</div>
+              <div className="text-[10px] text-ink-soft flex items-center gap-1.5">
+                {ended ? (
+                  <span className="text-red-500 font-semibold">Meeting ended</span>
+                ) : (
+                  <>
+                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                    <span>{room.participants.length} participants</span>
+                    <span className="hidden lg:inline">· {messages.length} messages</span>
+                  </>
+                )}
               </div>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             <div className="hidden sm:flex">
               {room.participants.slice(0, 5).map((p, i) => (
                 <div key={p.name} style={{ marginLeft: i === 0 ? 0 : -6 }} className="ring-2 ring-white rounded-full">
@@ -682,7 +701,7 @@ export function Room() {
             </div>
             <button
               onClick={() => copyText(joinUrl, 'Invite link copied')}
-              className="text-[10px] font-semibold text-accent bg-accent-tint px-2 py-1 rounded hover:bg-accent/20"
+              className="text-[11px] sm:text-[10px] font-semibold text-accent bg-accent-tint px-2.5 py-1.5 sm:px-2 sm:py-1 rounded-md hover:bg-accent/20 active:scale-95 transition"
             >
               Share
             </button>
@@ -690,42 +709,66 @@ export function Room() {
           </div>
         </header>
 
-        <div className="lg:hidden grid grid-cols-3 gap-1 border-b border-border-faint bg-surface p-2 text-[11px]">
-          {[
-            ['chat', 'Chat'],
-            ['people', 'People'],
-            ['outputs', 'Outputs'],
-          ].map(([key, label]) => (
-            <button
-              key={key}
-              onClick={() => setMobilePanel(key as 'chat' | 'people' | 'outputs')}
-              className={`rounded-lg px-2 py-1.5 font-semibold ${mobilePanel === key ? 'bg-accent text-white' : 'text-ink-soft bg-surface-softer'}`}
-            >
-              {label}
-            </button>
-          ))}
+        {/*
+          Mobile tab strip. Tasks sits second because handing work to an agent
+          and ruling on what came back is the reason a host opens this on a
+          phone; People is the occasional admin trip. 44px targets (the old
+          38px row was hard to hit one-handed), and the Tasks tab carries an
+          amber count when deliveries are waiting on a ruling so the signal
+          reaches the user while they are still reading Chat.
+        */}
+        <div className="lg:hidden grid grid-cols-3 gap-1.5 border-b border-border-faint bg-surface-softer p-1.5 shrink-0" role="tablist">
+          {([
+            ['chat', 'Chat', messages.length, false],
+            ['tasks', 'Tasks', openTaskCount, reviewTaskCount > 0],
+            ['people', 'People', room.participants.length, false],
+          ] as const).map(([key, label, count, alert]) => {
+            const active = mobilePanel === key;
+            return (
+              <button
+                key={key}
+                role="tab"
+                aria-selected={active}
+                onClick={() => setMobilePanel(key)}
+                className={`min-h-11 rounded-lg px-2 text-[13px] font-semibold flex items-center justify-center gap-1.5 transition active:scale-[0.98] ${
+                  active
+                    ? 'bg-accent text-white shadow-sm'
+                    : 'text-ink-muted hover:text-ink bg-surface border border-border-faint'
+                }`}
+              >
+                <span>{label}</span>
+                <span
+                  className={`text-[11px] px-1.5 py-0.5 rounded-full font-bold ${
+                    active
+                      ? 'bg-white/25 text-white'
+                      : alert
+                        ? 'bg-amber-100 text-amber-800'
+                        : 'bg-surface-sunken text-ink-faint'
+                  }`}
+                >
+                  {alert ? `${reviewTaskCount} review` : count}
+                </span>
+              </button>
+            );
+          })}
         </div>
 
-        <div className="min-h-0 grid lg:grid-cols-[260px_minmax(0,1fr)_300px] bg-surface-soft">
-          <aside className={`${mobilePanel === 'people' ? 'flex' : 'hidden'} lg:flex min-h-0 flex-col border-r border-border-faint bg-surface`}>
+        <div className="min-h-0 min-w-0 overflow-x-hidden grid lg:grid-cols-[260px_minmax(0,1fr)_340px] bg-surface-soft">
+          <aside className={`${mobilePanel === 'people' ? 'flex' : 'hidden'} lg:flex min-h-0 min-w-0 flex-col border-r border-border-faint bg-surface`}>
             <div className="p-4 border-b border-border-faint">
-              <div className="text-[10px] font-semibold uppercase text-ink-faint mb-2">Room</div>
-              <h2 className="text-sm font-semibold leading-snug">{room.topic}</h2>
-              <div className="mt-3">
+              <h2 className="hidden lg:block text-sm font-semibold leading-snug">{room.topic}</h2>
+              <div className="hidden lg:block mt-3">
                 <MeetingCodePill code={code} />
               </div>
               <button
                 onClick={() => copyText(joinUrl, 'Invite link copied')}
-                className="mt-3 w-full text-[11px] font-semibold text-accent bg-accent-tint px-3 py-2 rounded-lg hover:bg-accent/20"
+                className="mt-3 w-full min-h-10 sm:min-h-8 text-[13px] sm:text-xs font-semibold text-accent bg-accent-tint px-3 rounded-lg transition active:scale-[0.98] hover:bg-accent/20"
               >
                 Copy invite link
               </button>
-              <div className="mt-3 rounded-lg border border-border-faint bg-surface-softer p-2.5">
+              <div className="mt-3 lg:mt-3 rounded-lg border border-border-faint bg-surface-softer p-2.5">
                 <div className="mb-2 flex items-center justify-between gap-2">
-                  <span className="text-[10px] font-semibold uppercase text-ink-faint">Reply mode</span>
-                  <span className="rounded bg-white px-1.5 py-0.5 text-[9px] font-semibold text-ink-soft">
-                    {modeLabel(replyMode)}
-                  </span>
+                  <span className="text-[12px] font-semibold text-ink-muted">Who replies</span>
                 </div>
                 {canConfigureReplyMode ? (
                   <div className="space-y-2">
@@ -733,7 +776,7 @@ export function Room() {
                       value={replyMode}
                       onChange={e => { void updateReplyMode(e.target.value as ReplyMode); }}
                       disabled={modeBusy}
-                      className="h-9 w-full rounded-md border border-border bg-white px-2 text-xs font-semibold text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent-tint disabled:opacity-60"
+                      className="h-11 sm:h-9 w-full rounded-lg border border-border bg-white px-2.5 text-[15px] sm:text-xs font-semibold text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent-tint disabled:opacity-60"
                     >
                       <option value="open">Open</option>
                       <option value="sequential">Sequential</option>
@@ -744,7 +787,7 @@ export function Room() {
                         value={selectedLeadAgentName}
                         onChange={e => { void updateReplyMode('sequential', { leadAgentName: e.target.value, leadAgentClient: 'cc' }); }}
                         disabled={modeBusy || activeRoomAgents.length === 0}
-                        className="h-9 w-full rounded-md border border-border bg-white px-2 text-xs font-semibold text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent-tint disabled:opacity-60"
+                        className="h-11 sm:h-9 w-full rounded-lg border border-border bg-white px-2.5 text-[15px] sm:text-xs font-semibold text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent-tint disabled:opacity-60"
                         aria-label="Lead agent"
                       >
                         {activeRoomAgents.length === 0 ? (
@@ -759,7 +802,7 @@ export function Room() {
                         value={selectedModeratorAgentName}
                         onChange={e => { void updateReplyMode('moderator', { moderatorAgentName: e.target.value, moderatorAgentClient: 'cc' }); }}
                         disabled={modeBusy || activeRoomAgents.length === 0}
-                        className="h-9 w-full rounded-md border border-border bg-white px-2 text-xs font-semibold text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent-tint disabled:opacity-60"
+                        className="h-11 sm:h-9 w-full rounded-lg border border-border bg-white px-2.5 text-[15px] sm:text-xs font-semibold text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent-tint disabled:opacity-60"
                         aria-label="Moderator agent"
                       >
                         {activeRoomAgents.length === 0 ? (
@@ -773,10 +816,10 @@ export function Room() {
                       <div className="rounded-md border border-border-faint bg-white px-2 py-1.5">
                         <div className="flex items-center justify-between gap-2">
                           <div className="min-w-0">
-                            <div className="truncate text-[11px] font-semibold text-ink">
+                            <div className="truncate text-[12px] font-semibold text-ink">
                               {currentSpeaker ? `Now: ${currentSpeaker.name}` : 'No active turn'}
                             </div>
-                            <div className="text-[9px] text-ink-soft">
+                            <div className="text-[11px] text-ink-soft">
                               {currentSpeaker && currentDeadlineMs !== null
                                 ? `${Math.ceil(currentDeadlineMs / 1000)}s left`
                                 : 'Waiting'}
@@ -787,7 +830,7 @@ export function Room() {
                               type="button"
                               onClick={() => { void handleSkipCurrent(); }}
                               disabled={modeBusy}
-                              className="h-7 rounded-md border border-amber-200 bg-amber-50 px-2 text-[10px] font-semibold text-amber-700 transition hover:bg-amber-100 disabled:opacity-60"
+                              className="h-10 sm:h-8 rounded-lg border border-amber-200 bg-amber-50 px-3 text-[12px] sm:text-[11px] font-semibold text-amber-700 transition active:scale-[0.98] hover:bg-amber-100 disabled:opacity-60"
                             >
                               Skip
                             </button>
@@ -803,10 +846,7 @@ export function Room() {
             </div>
 
             <div className="flex-1 overflow-y-auto p-4">
-              <div className="text-[10px] font-semibold uppercase text-ink-faint mb-1">Participants</div>
-              <p className="mb-3 text-[10px] leading-relaxed text-ink-soft">
-                Listening = inside an active listen window. Disconnected = no heartbeat for 5+ min, likely the CLI session was killed without leaving cleanly — host can remove with the × button.
-              </p>
+              <div className="mb-2.5 text-[13px] font-semibold text-ink">In the room</div>
               <div className="space-y-2">
                 {room.participants.map(p => {
                   const isMeHost = room.createdBy === self.name;
@@ -831,15 +871,15 @@ export function Room() {
                     >
                       <Avatar initials={p.initials} color={p.color} size="sm" />
                       <div className="min-w-0 flex-1">
-                        <div className="text-xs font-semibold truncate flex items-center gap-1 flex-wrap">
+                        <div className="text-[13px] sm:text-xs font-semibold truncate flex items-center gap-1 flex-wrap">
                           {p.name}
-                          {p.name === room.createdBy && <span className="text-[9px] font-semibold text-accent bg-accent-tint px-1 py-px rounded">host</span>}
-                          {isMuted && <span className="text-[9px] font-semibold text-amber-700 bg-amber-100 px-1 py-px rounded">muted</span>}
+                          {p.name === room.createdBy && <span className="text-[10px] font-semibold text-accent bg-accent-tint px-1.5 py-0.5 rounded">host</span>}
+                          {isMuted && <span className="text-[10px] font-semibold text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded">muted</span>}
                         </div>
-                        <div className="text-[10px] text-ink-soft truncate">
-                          {[p.role, p.client].filter(Boolean).join(' · ')}
+                        <div className="text-[11px] text-ink-soft truncate">
+                          {[p.role, p.client === 'cc' ? 'CLI' : 'browser'].filter(Boolean).join(' · ')}
                         </div>
-                        <div className={`mt-0.5 flex items-center gap-1 text-[9px] font-medium ${presence.className}`}>
+                        <div className={`mt-1 flex items-center gap-1 text-[11px] font-medium ${presence.className}`}>
                           <span className={`h-1.5 w-1.5 rounded-full ${presence.dotClassName}`} />
                           <span>{presence.label}</span>
                           {presence.detail && <span className="text-ink-faint">· {presence.detail}</span>}
@@ -862,7 +902,7 @@ export function Room() {
                               title={`Ask ${p.name}`}
                               aria-label={`Ask ${p.name}`}
                               disabled={modeBusy}
-                              className="flex h-7 min-w-7 items-center justify-center rounded-md border border-accent-tint-border bg-accent-tint px-1.5 text-[10px] font-semibold text-accent transition hover:bg-accent-tint-border disabled:opacity-60"
+                              className="flex h-10 min-w-10 sm:h-8 sm:min-w-8 items-center justify-center rounded-lg border border-accent-tint-border bg-accent-tint px-2.5 text-[12px] sm:text-[11px] font-semibold text-accent transition hover:bg-accent-tint-border active:scale-[0.98] disabled:opacity-60"
                             >
                               Ask
                             </button>
@@ -872,7 +912,7 @@ export function Room() {
                               onClick={() => handleToggleMute({ name: p.name, client: p.client, canSpeak: p.canSpeak })}
                               title={isMuted ? `Unmute ${p.name}` : `Mute ${p.name}`}
                               aria-label={isMuted ? `Unmute ${p.name}` : `Mute ${p.name}`}
-                              className={`flex h-7 w-7 items-center justify-center rounded-md border text-[11px] transition ${isMuted
+                              className={`flex h-10 w-10 sm:h-8 sm:w-8 items-center justify-center rounded-lg border text-[11px] transition active:scale-[0.98] ${isMuted
                                 ? 'border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
                                 : 'border-border-faint bg-surface text-ink-soft hover:border-amber-300 hover:bg-amber-50 hover:text-amber-700'}`}
                             >
@@ -895,7 +935,7 @@ export function Room() {
                               onClick={() => handleKick({ name: p.name, client: p.client })}
                               title={`Remove ${p.name}`}
                               aria-label={`Remove ${p.name}`}
-                              className="flex h-7 w-7 items-center justify-center rounded-md border border-border-faint bg-surface text-ink-soft transition hover:border-red-300 hover:bg-red-50 hover:text-red-600"
+                              className="flex h-10 w-10 sm:h-8 sm:w-8 items-center justify-center rounded-lg border border-border-faint bg-surface text-ink-soft transition active:scale-[0.98] hover:border-red-300 hover:bg-red-50 hover:text-red-600"
                             >
                               <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" aria-hidden="true">
                                 <path d="m4 4 8 8M12 4l-8 8" />
@@ -914,19 +954,19 @@ export function Room() {
               {!ended && room.createdBy === self.name && (
                 <button
                   onClick={handleEndMeeting}
-                  className="flex-1 text-[11px] font-semibold text-red-600 bg-red-50 px-3 py-2 rounded-lg hover:bg-red-100"
+                  className="flex-1 min-h-10 sm:min-h-8 text-[13px] sm:text-xs font-semibold text-red-600 bg-red-50 px-3 rounded-lg transition active:scale-[0.98] hover:bg-red-100"
                 >
                   End
                 </button>
               )}
-              <button onClick={() => navigate('/')} className="flex-1 text-[11px] font-semibold text-ink-muted bg-surface-softer px-3 py-2 rounded-lg">
+              <button onClick={() => navigate('/')} className="flex-1 min-h-10 sm:min-h-8 text-[13px] sm:text-xs font-semibold text-ink-muted bg-surface-softer px-3 rounded-lg transition active:scale-[0.98]">
                 Home
               </button>
             </div>
           </aside>
 
-          <section className={`${mobilePanel === 'chat' ? 'flex' : 'hidden'} lg:flex min-h-0 flex-col`}>
-            <div className="px-5 py-3 border-b border-border-faint bg-surface flex items-center justify-between">
+          <section className={`${mobilePanel === 'chat' ? 'flex' : 'hidden'} lg:flex min-h-0 min-w-0 flex-col`}>
+            <div className="hidden lg:flex px-5 py-3 border-b border-border-faint bg-surface items-center justify-between">
               <div>
                 <div className="text-sm font-semibold">Discussion</div>
                 <div className="text-[10px] text-ink-soft">Live room chat</div>
@@ -934,7 +974,7 @@ export function Room() {
               {ended && <span className="text-[10px] font-semibold text-red-500">Ended</span>}
             </div>
 
-            <div ref={feedRef} className="flex-1 overflow-y-auto p-5 flex flex-col gap-3 bg-surface-soft relative">
+            <div ref={feedRef} className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden p-3 sm:p-5 flex flex-col gap-3 bg-surface-soft relative">
               {(() => {
                 // Names that appear with more than one client in the room get
                 // disambiguated as "Name · web" / "Name · cc" in each bubble.
@@ -954,6 +994,26 @@ export function Room() {
                   />
                 ));
               })()}
+
+              {messages.length === 0 && (
+                <div className="m-auto max-w-xs px-2 text-center">
+                  <h2 className="text-[15px] font-semibold text-ink">Nothing said yet</h2>
+                  <p className="mt-2 text-[13px] leading-relaxed text-ink-soft">
+                    {roomAgents.length === 0
+                      ? 'Share the room code and tell your agent to join it. Once it is here, tap its name above the message box to hand it work.'
+                      : 'Tap an agent name above the message box to address it, or open Tasks to hand it something with a definition of done.'}
+                  </p>
+                  {roomAgents.length === 0 && (
+                    <button
+                      type="button"
+                      onClick={() => copyText(joinUrl, 'Invite link copied')}
+                      className="mt-4 min-h-10 rounded-lg bg-accent px-4 text-[13px] font-semibold text-white shadow-sm transition active:scale-[0.98] hover:opacity-90"
+                    >
+                      Copy invite link
+                    </button>
+                  )}
+                </div>
+              )}
 
               {showIdlePrompt && !ended && (
                 <div className="sticky bottom-0 mx-auto bg-white border border-border rounded-xl shadow-lg p-4 text-center max-w-sm">
@@ -1020,15 +1080,20 @@ export function Room() {
               </div>
             ) : !myCanSpeak ? (
               <div className="border-t border-border-faint p-5 bg-amber-50 text-center">
-                <div className="text-2xl mb-1">🔇</div>
+                <div className="mb-2 flex justify-center text-amber-700">
+                  <svg viewBox="0 0 16 16" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M8 3.5 4.5 6.25H2.5v3.5h2L8 12.5z" />
+                    <path d="m11 6 3 4M14 6l-3 4" />
+                  </svg>
+                </div>
                 <p className="text-sm font-semibold text-amber-900 mb-1">You've been muted by the host</p>
                 <p className="text-xs text-amber-800/80 max-w-xs mx-auto">
-                  The host ({room.createdBy}) has muted your messages. You can still read the conversation — ask them to unmute (🔊) when you're ready to speak again.
+                  The host ({room.createdBy}) has muted your messages. You can still read the conversation. Ask them to unmute you when you are ready to speak again.
                 </p>
               </div>
             ) : (
               <div
-                className={`relative border-t border-border-faint p-3 bg-surface flex flex-col gap-2 transition ${dragActive ? 'ring-2 ring-inset ring-accent bg-accent-tint/40' : ''}`}
+                className={`relative min-w-0 border-t border-border-faint p-2.5 sm:p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] bg-surface flex flex-col gap-2 transition ${dragActive ? 'ring-2 ring-inset ring-accent bg-accent-tint/40' : ''}`}
                 onDragEnter={handleDragEnter}
                 onDragOver={handleDragOver}
                 onDragLeave={handleDragLeave}
@@ -1041,8 +1106,11 @@ export function Room() {
                 )}
                 {isHost && mutedCount > 0 && (
                   <div className="text-[11px] font-semibold text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2 py-1.5 flex items-center gap-2">
-                    <span>🔇</span>
-                    <span>{mutedCount} {mutedCount === 1 ? 'participant is' : 'participants are'} muted — open the People panel to unmute (🔊).</span>
+                    <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="shrink-0">
+                      <path d="M8 3.5 4.5 6.25H2.5v3.5h2L8 12.5z" />
+                      <path d="m11 6 3 4M14 6l-3 4" />
+                    </svg>
+                    <span>{mutedCount} {mutedCount === 1 ? 'participant is' : 'participants are'} muted. Open People to unmute.</span>
                   </div>
                 )}
                 {attachments.length > 0 && (
@@ -1056,144 +1124,142 @@ export function Room() {
                     ))}
                   </div>
                 )}
-                <div className="flex flex-wrap items-center gap-2 text-[10px]">
-                  <span className="font-semibold text-ink-faint">Ask your agents:</span>
+                {/*
+                  Command deck. Targeting an agent used to live only as an
+                  "Ask" button inside each People row, so on a phone giving one
+                  agent a job meant leaving Chat, finding the row, tapping Ask,
+                  then coming back. The agents are now chips on the composer
+                  itself: tap to address one (or to hand it the turn directly
+                  in sequential / moderator mode) without losing the thread.
+                */}
+                <div className="flex w-full min-w-0 flex-wrap items-center gap-2 py-0.5 shrink-0">
+                  {roomAgents.length === 0 ? (
+                    messages.length > 0 && (
+                      <span className="w-full text-[12px] text-ink-soft">
+                        No agents here yet. Share the room code to bring one in.
+                      </span>
+                    )
+                  ) : (
+                    roomAgents.map(agent => {
+                      const muted = agent.canSpeak === false;
+                      return (
+                        <button
+                          key={`${agent.name}-${agent.client}`}
+                          type="button"
+                          disabled={modeBusy || muted}
+                          onClick={() => { void handleAskAgent(agent); }}
+                          title={muted ? `${agent.name} is muted` : `Ask ${agent.name}`}
+                          className="shrink-0 min-h-10 rounded-full border border-accent-tint-border bg-accent-tint px-3.5 text-[13px] font-semibold text-accent transition hover:bg-accent-tint-border active:scale-[0.98] disabled:opacity-45 disabled:cursor-not-allowed"
+                        >
+                          @{agent.name}
+                        </button>
+                      );
+                    })
+                  )}
+                  {roomAgents.length > 0 && (<>
                   <button
                     type="button"
                     onClick={() => fillPrompt('minutes')}
-                    className="rounded-full border border-accent-tint-border bg-accent-tint px-2.5 py-1 font-semibold text-accent hover:bg-accent-tint-border transition"
+                    className="shrink-0 min-h-10 rounded-full border border-border bg-surface-softer px-3.5 text-[13px] font-semibold text-ink-muted transition hover:border-accent/40 hover:text-accent active:scale-[0.98]"
                   >
-                    Ask for minutes
+                    Minutes
                   </button>
                   <button
                     type="button"
                     onClick={() => fillPrompt('reply')}
-                    className="rounded-full border border-border bg-surface-softer px-2.5 py-1 font-semibold text-ink-muted hover:border-accent/40 hover:text-accent transition"
+                    className="shrink-0 min-h-10 rounded-full border border-border bg-surface-softer px-3.5 text-[13px] font-semibold text-ink-muted transition hover:border-accent/40 hover:text-accent active:scale-[0.98]"
                   >
-                    Ask for reply draft
+                    Reply draft
                   </button>
-                  <span className="hidden sm:inline text-ink-faint">Prefills your message. You choose the agent and send.</span>
+                  </>)}
                 </div>
-                <div className="flex items-center gap-2">
-                  <VoiceButton
-                    onTranscript={(t) => setText(prev => prev.trim() ? `${prev.trim()} ${t}` : t)}
-                    disabled={ended}
-                  />
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    multiple
-                    className="hidden"
-                    accept={Array.from(ALLOWED_ATTACHMENT_TYPES).join(',')}
-                    onChange={e => { if (e.target.files) void addFiles(e.target.files); }}
-                  />
-                  <button
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={attachBusy || attachments.length >= MAX_ATTACHMENTS_PER_MESSAGE}
-                    title="Attach files"
-                    className="h-9 rounded-lg bg-surface-softer border border-border px-2 text-xs font-semibold text-ink-muted disabled:opacity-50"
-                  >
-                    {attachBusy ? '...' : 'Attach'}
-                  </button>
-                  <textarea
-                    ref={textareaRef}
-                    value={text}
-                    onChange={e => setText(e.target.value)}
-                    onPaste={e => { void handlePaste(e); }}
-                    onKeyDown={e => {
-                      // Enter sends; Shift+Enter / IME composition lets newlines through.
-                      if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-                        e.preventDefault();
-                        send();
-                      }
-                    }}
-                    placeholder="Message the room… (Enter to send, Shift+Enter for newline)"
-                    rows={1}
-                    style={{ height: TEXTAREA_MIN_HEIGHT, maxHeight: TEXTAREA_MAX_HEIGHT }}
-                    className="flex-1 resize-none overflow-y-auto px-3 py-2 bg-surface-softer border border-border rounded-lg text-sm leading-relaxed outline-none focus:border-accent focus:ring-4 focus:ring-accent-tint"
-                  />
-                  <button
-                    onClick={send}
-                    disabled={!text.trim() && attachments.length === 0}
-                    className="self-end bg-accent text-white px-4 py-2 rounded-lg text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    Send
-                  </button>
+                <div className="flex flex-col sm:flex-row sm:items-end gap-2">
+                  <div className="relative flex-1 min-w-0">
+                    <textarea
+                      ref={textareaRef}
+                      value={text}
+                      onChange={e => setText(e.target.value)}
+                      onPaste={e => { void handlePaste(e); }}
+                      onKeyDown={e => {
+                        // Desktop: Enter sends; Shift+Enter for new line.
+                        // Mobile touch: let Enter insert a newline so user can type freely without accidental send.
+                        const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+                        if (!isTouch && e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                          e.preventDefault();
+                          send();
+                        }
+                      }}
+                      placeholder="Message the room…"
+                      rows={1}
+                      style={{ height: TEXTAREA_MIN_HEIGHT, maxHeight: TEXTAREA_MAX_HEIGHT }}
+                      className="w-full resize-none overflow-y-auto px-3.5 py-2.5 bg-surface-softer border border-border rounded-xl text-base sm:text-sm leading-relaxed outline-none focus:border-accent focus:ring-2 focus:ring-accent-tint"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between sm:justify-start gap-2 shrink-0">
+                    <div className="flex items-center gap-1.5">
+                      <VoiceButton
+                        onTranscript={(t) => setText(prev => prev.trim() ? `${prev.trim()} ${t}` : t)}
+                        disabled={ended}
+                      />
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        multiple
+                        className="hidden"
+                        accept={Array.from(ALLOWED_ATTACHMENT_TYPES).join(',')}
+                        onChange={e => { if (e.target.files) void addFiles(e.target.files); }}
+                      />
+                      <button
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={attachBusy || attachments.length >= MAX_ATTACHMENTS_PER_MESSAGE}
+                        title="Attach files"
+                        className="h-10 w-10 sm:h-9 sm:w-auto justify-center rounded-lg bg-surface-softer border border-border sm:px-2 text-xs font-semibold text-ink-muted disabled:opacity-50 flex items-center gap-1.5 active:scale-95 transition"
+                      >
+                        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <path d="M13 7.5v3a4 4 0 0 1-8 0v-5a2.5 2.5 0 0 1 5 0v5a1 1 0 0 1-2 0v-4.5" />
+                        </svg>
+                        <span className="hidden sm:inline sm:text-xs">{attachBusy ? '...' : 'Attach'}</span>
+                      </button>
+                    </div>
+                    <button
+                      onClick={send}
+                      disabled={!text.trim() && attachments.length === 0}
+                      className="min-h-[40px] sm:min-h-[36px] min-w-[78px] sm:min-w-[64px] bg-accent text-white px-5 sm:px-4 py-2 rounded-xl text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 transition shadow-sm flex items-center justify-center gap-1.5"
+                    >
+                      <span>Send</span>
+                      <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor" aria-hidden="true">
+                        <path d="M1.5 1.5l13 6.5-13 6.5 2-6.5-2-6.5zm3.2 6.5h5.8-5.8z" />
+                      </svg>
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
           </section>
 
-          <aside className={`${mobilePanel === 'outputs' ? 'flex' : 'hidden'} lg:flex min-h-0 flex-col border-l border-border-faint bg-surface`}>
-            <div className="p-4 border-b border-border-faint">
-              <div className="text-[10px] font-semibold uppercase text-ink-faint mb-2">Outputs</div>
-              <div className="grid grid-cols-2 gap-2">
-                <div className="rounded-lg bg-surface-softer border border-border-faint p-2">
-                  <div className="text-base font-semibold">{messages.length}</div>
-                  <div className="text-[10px] text-ink-soft">Messages</div>
-                </div>
-                <div className="rounded-lg bg-surface-softer border border-border-faint p-2">
-                  <div className="text-base font-semibold">{room.participants.length}</div>
-                  <div className="text-[10px] text-ink-soft">People</div>
-                </div>
-              </div>
-            </div>
-
-            <div className="flex-1 min-h-0 overflow-y-auto p-4">
-              <div className="mb-5 rounded-xl border border-accent-tint-border bg-accent-tint p-4">
-                <h2 className="text-sm font-semibold text-accent-deep mb-2">Report</h2>
-                <p className="text-[11px] leading-relaxed text-accent-deep/80 mb-3">Freeze this room into a shareable delivery report.</p>
-                <button
-                  onClick={handleExportReport}
-                  disabled={reportBusy || messages.length === 0}
-                  className="w-full bg-accent text-white text-[11px] font-semibold px-3 py-2 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {reportBusy ? 'Saving…' : 'Save & Share'}
-                </button>
-              </div>
-
-              <div className="mb-5">
-                <div className="flex items-center justify-between mb-3">
-                  <h2 className="text-sm font-semibold">Artifacts</h2>
-                  <span className="text-[10px] text-ink-soft">{artifacts.length}</span>
-                </div>
-                {artifacts.length ? (
-                  <div className="space-y-2">
-                    {artifacts.slice(-8).reverse().map(artifact => (
-                      <ArtifactCard key={artifact.id} artifact={artifact} />
-                    ))}
-                  </div>
-                ) : (
-                  <div className="rounded-lg border border-border-faint bg-surface-softer p-3 text-[11px] leading-relaxed text-ink-soft">
-                    Use [DECISION], [TODO], [STATUS], or [RESULT] in messages to build the delivery log.
-                  </div>
-                )}
-              </div>
-
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-sm font-semibold">Minutes</h2>
-              </div>
-              <div className="rounded-lg border border-border-faint bg-surface-softer p-3 text-[11px] leading-relaxed text-ink-soft">
-                Ask an agent to generate minutes from the composer. The result will appear in the transcript and can be captured in the delivery report.
-              </div>
-            </div>
+          <aside className={`${mobilePanel === 'tasks' ? 'flex' : 'hidden'} lg:flex min-h-0 min-w-0 flex-col border-l border-border-faint bg-surface`}>
+            {/*
+              The task board the MCP server has always had (room_task: owner,
+              a different verifier, evidence, verdicts) but the web client
+              never rendered. Before this, a host on a phone could only infer
+              agent progress from chat prose and regex-scraped [TODO] markers.
+            */}
+            <TaskBoard
+              code={code}
+              me={me}
+              isHost={isHost}
+              ended={ended}
+              agents={roomAgents}
+              artifacts={artifacts}
+              canExport={messages.length > 0}
+              reportBusy={reportBusy}
+              onExportReport={handleExportReport}
+              onMention={appendText}
+              taskBoard={taskBoard}
+            />
           </aside>
         </div>
       </div>
-    </div>
-  );
-}
-
-function ArtifactCard({ artifact }: { artifact: RoomArtifact }) {
-  return (
-    <div className="rounded-lg border border-border-faint bg-surface-softer p-3">
-      <div className="mb-1 flex items-center justify-between gap-2">
-        <span className={`text-[9px] font-semibold uppercase ${artifactTone(artifact.kind)}`}>
-          {artifactLabel(artifact.kind)}
-        </span>
-        <span className="text-[9px] text-ink-faint">{artifact.author}</span>
-      </div>
-      <p className="text-[11px] leading-relaxed text-ink">{artifact.text}</p>
     </div>
   );
 }
@@ -1219,19 +1285,6 @@ function PendingAttachment({ attachment, onRemove }: { attachment: MessageAttach
   );
 }
 
-function artifactTone(kind: ArtifactKind): string {
-  switch (kind) {
-    case 'decision':
-      return 'text-emerald-700';
-    case 'todo':
-      return 'text-amber-700';
-    case 'status':
-      return 'text-blue-700';
-    case 'result':
-      return 'text-violet-700';
-  }
-}
-
 function participantPresence(p: Participant, now: number) {
   if (p.listenUntil && p.listenUntil > now) {
     return {
@@ -1247,7 +1300,7 @@ function participantPresence(p: Participant, now: number) {
     return {
       kind: 'online' as const,
       label: 'Online',
-      detail: p.client === 'cc' ? 'hook unknown' : '',
+      detail: '',
       className: 'text-blue-700',
       dotClassName: 'bg-blue-500',
     };

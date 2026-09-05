@@ -88,13 +88,16 @@ export function VoiceButton({ onTranscript, disabled }: Props) {
         onClick={listening ? stop : start}
         aria-label={listening ? 'Stop voice input' : 'Start voice input'}
         title={listening ? 'Stop voice input' : 'Start voice input'}
-        className={`text-base leading-none w-9 h-9 flex items-center justify-center rounded-lg transition ${
+        className={`leading-none w-10 h-10 sm:w-9 sm:h-9 flex items-center justify-center rounded-lg transition ${
           listening
             ? 'bg-red-100 text-red-600 animate-pulse'
             : 'bg-surface-softer text-ink-soft hover:bg-accent-tint hover:text-accent'
         } disabled:opacity-50 disabled:cursor-not-allowed`}
       >
-        🎤
+        <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <rect x="6" y="2" width="4" height="7" rx="2" />
+          <path d="M4 7.5a4 4 0 0 0 8 0M8 11.5V14" />
+        </svg>
       </button>
       {listening && interim && (
         <div className="absolute left-3 right-3 -top-7 px-3 py-1 bg-accent-tint text-accent-deep text-[11px] italic rounded-full shadow-sm truncate pointer-events-none">
