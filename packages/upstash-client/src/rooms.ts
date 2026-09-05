@@ -6,6 +6,7 @@ import type {
 } from '@agent-room/shared';
 import { AVATAR_PALETTE, DEFAULT_TURN_TIMEOUTS_MS, PRESENCE_DISCONNECTED_MS, ROOM_TTL_SECONDS } from '@agent-room/shared';
 import type { UpstashClient } from './client.js';
+import { sha256Hex } from './sha256.js';
 import { RoomNotFoundError, ConcurrencyError } from './errors.js';
 
 function roomKey(code: string): string { return `room:${code}`; }
@@ -21,11 +22,10 @@ function generateHostKey(): string {
   return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
 }
 
-async function sha256Hex(input: string): Promise<string> {
-  const cryptoObj: Crypto = (globalThis as unknown as { crypto: Crypto }).crypto;
-  const buf = await cryptoObj.subtle.digest('SHA-256', new TextEncoder().encode(input));
-  return Array.from(new Uint8Array(buf), b => b.toString(16).padStart(2, '0')).join('');
-}
+// Hashing goes through sha256.ts, which falls back to a pure-JS SHA-256 when
+// `crypto.subtle` is missing. That happens on any non-secure origin, notably
+// the dev server opened on a phone at http://<lan-ip>:5173, where this used to
+// throw and take room creation down with it.
 
 export interface CreateRoomInput {
   code: string;
