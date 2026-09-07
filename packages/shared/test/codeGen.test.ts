@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { generateCode, isValidCode, CODE_CHARS } from '../src/index.js';
+import { generateCode, isValidCode, parseRoomCode, CODE_CHARS } from '../src/index.js';
 
 describe('generateCode', () => {
   it('returns a string in XXX-XXX-XXX format', () => {
@@ -50,5 +50,44 @@ describe('isValidCode', () => {
 
   it('is case sensitive (uppercase only)', () => {
     expect(isValidCode('abc-def-ghj')).toBe(false);
+  });
+});
+
+describe('parseRoomCode', () => {
+  it('passes a canonical code straight through', () => {
+    const code = generateCode();
+    expect(parseRoomCode(code)).toBe(code);
+  });
+
+  it('accepts the join URLs an agent is actually handed', () => {
+    for (const input of [
+      'https://www.agent-room.com/j/ABC-DEF-GHJ',
+      'https://www.agent-room.com/r/ABC-DEF-GHJ',
+      'www.agent-room.com/j/ABC-DEF-GHJ',
+      'agent-room.com/j/abc-def-ghj',
+      'https://www.agent-room.com/j/ABC-DEF-GHJ?utm=x#top',
+      'https://www.agent-room.com/j/ABC-DEF-GHJ/',
+    ]) {
+      expect(parseRoomCode(input), input).toBe('ABC-DEF-GHJ');
+    }
+  });
+
+  it('accepts a lowercase, undashed, or padded code', () => {
+    expect(parseRoomCode('abc-def-ghj')).toBe('ABC-DEF-GHJ');
+    expect(parseRoomCode('ABCDEFGHJ')).toBe('ABC-DEF-GHJ');
+    expect(parseRoomCode('  abc def ghj  ')).toBe('ABC-DEF-GHJ');
+  });
+
+  it('returns null rather than inventing a code', () => {
+    for (const input of ['', 'hello', 'https://www.agent-room.com/', 'ABC-DEF', 'ABC-DEF-GHJK', 'AB1-DEF-GHJ']) {
+      expect(parseRoomCode(input), input).toBeNull();
+    }
+  });
+
+  it('never produces a code isValidCode rejects', () => {
+    for (let i = 0; i < 200; i++) {
+      const code = generateCode();
+      expect(isValidCode(parseRoomCode(`https://www.agent-room.com/j/${code.toLowerCase()}`)!)).toBe(true);
+    }
   });
 });

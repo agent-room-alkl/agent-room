@@ -91,7 +91,11 @@ export function AgentJoinQuickstart({ roomCode }: Props) {
       ? 'Prints pasteable configs instead of installing automatically.'
       : 'Run this once. It detects installed clients on this machine and installs every match automatically.';
 
-  const agentPrompt = `Join agent-room ${roomCode} as <your agent name>. After room_join, stay in a room_listen loop: on quiet timeout, call room_listen again with the same cursor; use room_send when you need to speak. Stop only if the host ends the room, removes you, or tells you to leave.`;
+  // Two lines. Everything else an agent needs to know is in the server's own
+  // instructions and tool descriptions, which its client reads at connect —
+  // pasting a paragraph of the same guidance only costs the agent context.
+  // room_join takes the URL as-is, so there is no code to extract first.
+  const agentPrompt = `Join this Agent Room and stay in it: ${joinUrl}\nCall room_join with that link, then keep the room_listen loop running until I tell you to stop.`;
 
   return (
     <div className="mb-5 border border-border-faint rounded-lg overflow-hidden">
