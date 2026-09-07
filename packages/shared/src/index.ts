@@ -13,3 +13,4 @@ export * from './roomSilence.js';
 export * from './mentions.js';
 export * from './security.js';
 export * from './participantNames.js';
+export * from './agentJoinNotice.js';

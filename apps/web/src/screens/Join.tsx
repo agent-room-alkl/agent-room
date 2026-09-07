@@ -7,6 +7,7 @@ import { ENV } from '../env.js';
 import { CodeInput } from '../components/CodeInput.js';
 import { AgentRoomLogo } from '../components/AgentRoomLogo.js';
 import { AgentJoinQuickstart } from '../components/AgentJoinQuickstart.js';
+import { AgentJoinNotice } from '../components/AgentJoinNotice.js';
 import { colorForName, initialsFor } from '../lib/colors.js';
 
 function stripDashes(s: string) { return s.replace(/-/g, ''); }
@@ -91,6 +92,8 @@ export function Join() {
       <div className="max-w-md mx-auto mt-10 p-8 bg-surface border border-border rounded-xl shadow-card">
       <h1 className="text-lg font-semibold tracking-tight">Join a meeting</h1>
       <p className="text-xs text-ink-soft mt-1 mb-6">Enter the 9-character code from your invite.</p>
+
+      <AgentJoinNotice code={raw.length === CODE_LEN ? withDashes(raw) : undefined} />
 
       <div className="mb-4">
         <CodeInput value={raw} onChange={setRaw} />

@@ -8,6 +8,7 @@ import { VoiceButton } from '../components/VoiceButton.js';
 import { MeetingCodePill } from '../components/MeetingCodePill.js';
 import { Avatar } from '../components/Avatar.js';
 import { AgentRoomLogo } from '../components/AgentRoomLogo.js';
+import { AgentJoinNotice } from '../components/AgentJoinNotice.js';
 import { colorForName, initialsFor } from '../lib/colors.js';
 import { PRESENCE_STALE_MS, PRESENCE_DISCONNECTED_MS, extractArtifacts, type Message, type MessageAttachment, type Participant, type ReplyMode, type ReplyModeConfig, type SystemEventType } from '@agent-room/shared';
 import { appendSystemMessage, directInvoke, getTurnState, hostSkipCurrent, setMuted, setReplyMode, createClient, createRoomReport, endRoom as endRoomApi, reactivateRoom as reactivateRoomApi, removeParticipant, type TurnState } from '@agent-room/upstash-client';
@@ -338,7 +339,19 @@ export function Room() {
   }, []);
 
   if (error) return <div className="p-10 text-red-600">{error}</div>;
-  if (!self) return <div className="p-10 text-ink-soft">Redirecting to join…</div>;
+  // An agent handed /r/CODE lands here, not on Join: there is no stored
+  // identity, so the effect above bounces it to /j/CODE. That bounce is a
+  // client-side navigation, and an agent that snapshots the page before it
+  // settles would otherwise read a bare "Redirecting to join…" and learn
+  // nothing. Carry the same notice through the interstitial.
+  if (!self) {
+    return (
+      <div className="mx-auto max-w-md p-10">
+        <AgentJoinNotice code={code} />
+        <div className="text-ink-soft">Redirecting to join…</div>
+      </div>
+    );
+  }
   if (!room) return <div className="p-10 text-ink-soft">Loading…</div>;
 
   // From here down `self` is non-null (early-returned above). Capture it in a

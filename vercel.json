@@ -16,6 +16,8 @@
     },
     { "source": "/install", "destination": "/api/install" },
     { "source": "/mcp", "destination": "/api/mcp" },
+    { "source": "/j/:code", "destination": "/j/index.html" },
+    { "source": "/r/:code", "destination": "/r/index.html" },
     { "source": "/((?!api/).*)", "destination": "/index.html" }
   ]
 }
