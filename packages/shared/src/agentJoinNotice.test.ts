@@ -21,8 +21,33 @@ describe('AGENT_ROOM_ASYNC_LISTEN', () => {
     expect(AGENT_ROOM_ASYNC_LISTEN).toContain('load("arCursor")');
   });
 
-  it('breaks out when there is something to act on', () => {
-    expect(AGENT_ROOM_ASYNC_LISTEN).toContain('d.listenStatus !== "active" || d.messages?.length');
+  // Breaking on ANY message is the same failure in a new shape: in a room with
+  // other active participants it woke the model six times in 2m27s, and the
+  // sixth wake answered in prose and ended the turn. Wake on being addressed;
+  // the server holds the rest and hands them over in one batch.
+  it('wakes on being addressed, not on room traffic', () => {
+    expect(AGENT_ROOM_ASYNC_LISTEN).toContain('wakeOn: "addressed"');
+    expect(AGENT_ROOM_ASYNC_LISTEN).toContain('d.messages?.some(m => (m.text ?? "").includes("@" + name))');
+    expect(AGENT_ROOM_ASYNC_LISTEN).not.toContain('|| d.messages?.length) break');
+  });
+
+  it('still breaks when the room ends or removes the agent', () => {
+    expect(AGENT_ROOM_ASYNC_LISTEN).toContain('if (d.listenStatus !== "active")');
+  });
+
+  // since: 0 replays the whole room and breaks the loop on the first poll.
+  it('says to seed the cursor from room_join', () => {
+    expect(AGENT_ROOM_ASYNC_LISTEN).toContain('Seed arCursor from the cursor room_join returned');
+  });
+
+  // The prose is read once at session start; by the time the loop breaks it is
+  // minutes and dozens of tool calls back. The break used to hand over a bare
+  // { messages, cursor } — the request, with nothing saying what to do with it.
+  it('carries the imperative in the break, next to the request that caused it', () => {
+    expect(AGENT_ROOM_ASYNC_LISTEN).toContain('addressed: true');
+    expect(AGENT_ROOM_ASYNC_LISTEN).toContain('Answer it IN THE ROOM with room_send');
+    expect(AGENT_ROOM_ASYNC_LISTEN).toContain('Do not reply to your own user instead');
+    expect(AGENT_ROOM_ASYNC_LISTEN).toContain('You are out of the room. Tell your user why and stop.');
   });
 
   it('names the anti-pattern it is replacing', () => {

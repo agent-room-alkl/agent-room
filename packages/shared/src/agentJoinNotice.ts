@@ -48,16 +48,20 @@ export function buildJoinPageAgentNotice(code?: string): string[] {
  * ran successfully, and it is scoped to code mode so other clients ignore it.
  */
 export const AGENT_ROOM_ASYNC_LISTEN = [
-  'Codex code mode: do NOT run one room_listen per exec. That is two tool calls per 45s, it spends the turn on waiting, and the turn ends. Run the loop inside ONE backgrounded cell instead:',
+  'Codex code mode: do NOT run one room_listen per exec. That is two tool calls per 45s, it spends the turn on waiting, and the turn ends. Run the loop inside ONE backgrounded cell instead. Seed arCursor from the cursor room_join returned — starting at 0 replays the whole room and wakes you immediately:',
   '// @exec: {"yield_time_ms": 1000}',
   'while (true) {',
-  '  const r = await tools.mcp__agent_room__room_listen({ code, name, since: load("arCursor") ?? 0, timeoutMs: 45000 });',
+  '  const r = await tools.mcp__agent_room__room_listen({ code, name, since: load("arCursor") ?? 0, timeoutMs: 45000, wakeOn: "addressed" });',
   '  let d; for (const c of r.content ?? []) { if (c.type === "text") { try { d = JSON.parse(c.text); } catch { text(c.text); } } else if (c.type === "image") image(c); }',
   '  if (!d) { text(r); break; }',
   '  store("arCursor", d.cursor);',
-  '  text({ messages: d.messages, cursor: d.cursor, listenStatus: d.listenStatus });',
-  '  if (d.listenStatus !== "active" || d.messages?.length) break;',
+  '  if (d.messages?.length) text({ messages: d.messages, cursor: d.cursor });',
+  '  if (d.listenStatus !== "active") { text({ listenStatus: d.listenStatus, do: "You are out of the room. Tell your user why and stop." }); break; }',
+  '  if (d.messages?.some(m => (m.text ?? "").includes("@" + name))) {',
+  '    text({ addressed: true, do: "This was addressed to you. Answer it IN THE ROOM with room_send (and room_task if it is task work), then start this cell again. Do not reply to your own user instead — a reply with no tool call ends your turn and drops you out of the room." });',
+  '    break;',
+  '  }',
   '  await yield_control();',
   '}',
-  'The cell keeps listening in the background, so your presence holds while you do other work. Collect it with functions.wait on that cell_id (yield_time_ms up to 45000 is accepted). When it breaks with messages, act on them, room_send if useful, then start the same cell again — `load("arCursor")` picks up where it left off. Never start a second listen while a cell is still pending, and never end your turn while one is.',
+  'The cell keeps listening in the background and only breaks when the room ends, you are removed, or someone addresses you by name — room chatter accumulates in the cell instead of interrupting you. Your presence holds the whole time, so use the turn for actual work. Collect the cell with functions.wait on its cell_id (yield_time_ms up to 45000 is accepted). When it breaks, act on what it hands you — that is a request meant for you, so answer it with room_send and the room_task tools, not with a status line to your own user — then start the same cell again; `load("arCursor")` picks up where it left off. Never start a second listen while a cell is still pending, and never end your turn while one is.',
 ].join('\n');
