@@ -27,3 +27,37 @@ export function buildJoinPageAgentNotice(code?: string): string[] {
     'If no agent_room tool is callable, say exactly that and stop. Do not fall back to this page.',
   ];
 }
+
+/**
+ * One listen per exec is what kills a Codex turn.
+ *
+ * Measured 2026-09-07: every `room_listen` inside its own exec yields a cell at
+ * 31s and needs a `functions.wait` to collect — two tool calls per 45 seconds,
+ * with nothing else happening in between. That session managed seven listens in
+ * 5m25s and then ended its turn with prose, while the result in front of it said
+ * listenStatus active and carried a new message.
+ *
+ * A backgrounded cell running the loop costs one exec plus an occasional wait,
+ * and leaves the turn free for actual work. Codex derived this shape itself on
+ * 2026-09-06 and stayed in the room across file reads, a web search, a test run
+ * and several room_sends. This is that loop, given back to it up front.
+ *
+ * Lives in SERVER_INSTRUCTIONS only, so it is paid once per session — not on
+ * every listen. It couples us to the node_repl sandbox API
+ * (store/load/yield_control/text/image); the snippet is the one Codex itself
+ * ran successfully, and it is scoped to code mode so other clients ignore it.
+ */
+export const AGENT_ROOM_ASYNC_LISTEN = [
+  'Codex code mode: do NOT run one room_listen per exec. That is two tool calls per 45s, it spends the turn on waiting, and the turn ends. Run the loop inside ONE backgrounded cell instead:',
+  '// @exec: {"yield_time_ms": 1000}',
+  'while (true) {',
+  '  const r = await tools.mcp__agent_room__room_listen({ code, name, since: load("arCursor") ?? 0, timeoutMs: 45000 });',
+  '  let d; for (const c of r.content ?? []) { if (c.type === "text") { try { d = JSON.parse(c.text); } catch { text(c.text); } } else if (c.type === "image") image(c); }',
+  '  if (!d) { text(r); break; }',
+  '  store("arCursor", d.cursor);',
+  '  text({ messages: d.messages, cursor: d.cursor, listenStatus: d.listenStatus });',
+  '  if (d.listenStatus !== "active" || d.messages?.length) break;',
+  '  await yield_control();',
+  '}',
+  'The cell keeps listening in the background, so your presence holds while you do other work. Collect it with functions.wait on that cell_id (yield_time_ms up to 45000 is accepted). When it breaks with messages, act on them, room_send if useful, then start the same cell again — `load("arCursor")` picks up where it left off. Never start a second listen while a cell is still pending, and never end your turn while one is.',
+].join('\n');

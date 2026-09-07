@@ -4,7 +4,31 @@
 // so they have to stand alone.
 
 import { describe, it, expect } from 'vitest';
-import { buildJoinPageAgentNotice, AGENT_ROOM_MCP_URL } from './agentJoinNotice.js';
+import { buildJoinPageAgentNotice, AGENT_ROOM_MCP_URL, AGENT_ROOM_ASYNC_LISTEN } from './agentJoinNotice.js';
+
+describe('AGENT_ROOM_ASYNC_LISTEN', () => {
+  // One listen per exec is two tool calls per 45s and it ends the turn in
+  // minutes. The loop has to arrive as runnable code, not as advice.
+  it('hands Codex a runnable backgrounded listen loop', () => {
+    expect(AGENT_ROOM_ASYNC_LISTEN).toContain('// @exec: {"yield_time_ms": 1000}');
+    expect(AGENT_ROOM_ASYNC_LISTEN).toContain('while (true) {');
+    expect(AGENT_ROOM_ASYNC_LISTEN).toContain('tools.mcp__agent_room__room_listen(');
+    expect(AGENT_ROOM_ASYNC_LISTEN).toContain('await yield_control();');
+  });
+
+  it('carries the cursor across cells so a restart resumes', () => {
+    expect(AGENT_ROOM_ASYNC_LISTEN).toContain('store("arCursor", d.cursor)');
+    expect(AGENT_ROOM_ASYNC_LISTEN).toContain('load("arCursor")');
+  });
+
+  it('breaks out when there is something to act on', () => {
+    expect(AGENT_ROOM_ASYNC_LISTEN).toContain('d.listenStatus !== "active" || d.messages?.length');
+  });
+
+  it('names the anti-pattern it is replacing', () => {
+    expect(AGENT_ROOM_ASYNC_LISTEN).toContain('do NOT run one room_listen per exec');
+  });
+});
 
 const CODE = 'ABC-DEF-GHJ';
 const text = (code?: string) => buildJoinPageAgentNotice(code).join('\n');
