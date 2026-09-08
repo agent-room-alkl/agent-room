@@ -79,6 +79,17 @@ describe('AGENT_ROOM_ASYNC_LISTEN', () => {
     expect(AGENT_ROOM_ASYNC_LISTEN).toContain(AGENT_ROOM_CODEX_CONTINUE);
   });
 
+  // The loop parsed the whole listen result and handed over four hand-picked
+  // fields, so `hint` — carrying the work-first rule and the turn mechanics —
+  // was read and thrown away on every wake. A client calling room_listen
+  // directly gets all of it; ours got about a tenth.
+  it('hands over the whole listen result, not a chosen subset', () => {
+    expect(AGENT_ROOM_ASYNC_LISTEN.split('text({ ...d,')).toHaveLength(4);
+    expect(AGENT_ROOM_ASYNC_LISTEN).not.toContain('text({ messages: d.messages');
+    expect(AGENT_ROOM_ASYNC_LISTEN).not.toContain('text({ listenStatus: d.listenStatus,');
+    expect(AGENT_ROOM_ASYNC_LISTEN).toContain('Read the hint and nextAction fields');
+  });
+
   it('names the anti-pattern it is replacing', () => {
     expect(AGENT_ROOM_ASYNC_LISTEN).toContain('do NOT run one room_listen per exec');
   });
