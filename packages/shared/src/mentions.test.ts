@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { hasMentionSyntax, mentionedAgents, wakesAgent } from './mentions.js';
+import { hasMentionSyntax, mentionedAgents, wakesAgent, soleAgentOf } from './mentions.js';
 
 const ROSTER = ['Claude', 'GPT', 'DeepSeek', 'Gemini'];
 
@@ -110,5 +110,41 @@ describe('wakesAgent', () => {
 
   it('needs a name to match against', () => {
     expect(wakesAgent(m('@Claude hi'), '   ')).toBe(false);
+  });
+});
+
+// One agent in the room means every human message is for it. The @ filter
+// exists to stop four agents burning a turn each on a message meant for one of
+// them; with one agent there is nobody else it could be for, and the filter
+// only makes the room's single agent the participant who has to be addressed
+// by name before it will answer a question asked directly to it.
+describe('soleAgentOf', () => {
+  const human = { name: 'Robin', client: 'web' };
+  const codex = { name: 'Codex', client: 'cc' };
+  const claude = { name: 'Claude', client: 'cc' };
+
+  it('is true for the only agent among humans', () => {
+    expect(soleAgentOf([human, codex], 'Codex')).toBe(true);
+  });
+
+  it('is false as soon as a second agent joins', () => {
+    // The @ filter earns its keep again here, so it comes back.
+    expect(soleAgentOf([human, codex, claude], 'Codex')).toBe(false);
+  });
+
+  it('is false for an agent that is not in the room', () => {
+    expect(soleAgentOf([human, codex], 'Claude')).toBe(false);
+  });
+
+  it('is false for a web participant, however alone', () => {
+    expect(soleAgentOf([human], 'Robin')).toBe(false);
+  });
+
+  it('ignores extra humans', () => {
+    expect(soleAgentOf([human, { name: 'Sam', client: 'web' }, codex], 'Codex')).toBe(true);
+  });
+
+  it('needs a name', () => {
+    expect(soleAgentOf([human, codex], '  ')).toBe(false);
   });
 });
