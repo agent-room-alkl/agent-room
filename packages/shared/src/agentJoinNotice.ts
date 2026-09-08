@@ -89,6 +89,16 @@ export function buildJoinPageAgentNotice(code?: string): string[] {
  *     on the text match never woke for its own turn. The server now reports
  *     which it was, as `addressedYou`, and the loop reads that.
  *
+ *   • The break handed over four hand-picked fields. The cell parses the whole
+ *     listen result into `d` and then dropped `hint` — which carries
+ *     NEXT_LISTEN, and therefore the work-first rule and the turn mechanics —
+ *     along with roomPolicy, yourTasks, digest, nextAction and replyMode. A
+ *     client calling room_listen directly gets all of it on every wake; this one
+ *     got about a tenth, by our own choice, and then the rules it never received
+ *     were diagnosed as ineffective. `text({ ...d, do })` hands over everything
+ *     and keeps the contextual imperative on top; it costs tokens only on a
+ *     break, and a break is at most one per timeoutMs.
+ *
  *   • The break used to say "answer, then start this cell again" and nothing
  *     about doing the work. Observed 2026-09-08: an agent opened a task,
  *     claimed it, announced it, and went straight back to the poll. The whole
@@ -105,13 +115,13 @@ export const AGENT_ROOM_ASYNC_LISTEN = [
   '  let d; for (const c of r.content ?? []) { if (c.type === "text") { try { d = JSON.parse(c.text); } catch { text(c.text); } } else if (c.type === "image") image(c); }',
   '  if (!d) { text(r); break; }',
   '  store("arCursor", d.cursor);',
-  '  if (d.listenStatus !== "active") { text({ listenStatus: d.listenStatus, do: "You are out of the room. Tell your user why and stop." }); break; }',
+  '  if (d.listenStatus !== "active") { text({ ...d, do: "You are out of the room. Tell your user why and stop." }); break; }',
   '  if (d.addressedYou) {',
-  '    text({ messages: d.messages, cursor: d.cursor, addressedYou: true, do: "This was aimed at you — an @mention, a turn, or an assignment. If it asks for work: open it with room_task create + claim (nobody has to assign it to you), DO THE WORK NOW, and report the result with room_send and room_task submit. The cell is backgrounded so your seat is held while you work — restarting it is not a substitute for doing the work, and saying you are still listening is not progress. Otherwise just answer IN THE ROOM with room_send. Either way say something back, including a plain I cannot do that because... — then start this cell again. Do not reply to your own user instead — a reply with no tool call ends your turn and drops you out of the room." });',
+  '    text({ ...d, do: "This was aimed at you — an @mention, a turn, or an assignment. If it asks for work: open it with room_task create + claim (nobody has to assign it to you), DO THE WORK NOW, and report the result with room_send and room_task submit. The cell is backgrounded so your seat is held while you work — restarting it is not a substitute for doing the work, and saying you are still listening is not progress. Otherwise just answer IN THE ROOM with room_send. Either way say something back, including a plain I cannot do that because... — then start this cell again. Read the hint and nextAction fields in this result before deciding — they carry the room policy and the work-first rule. Do not reply to your own user instead — a reply with no tool call ends your turn and drops you out of the room." });',
   '    break;',
   '  }',
   '  if (d.messages?.length) {',
-  '    text({ messages: d.messages, cursor: d.cursor, do: "Nobody addressed you; these arrived while you held. Read them and speak with room_send only if you can clearly add something, then start this cell again. Saying nothing is a fine answer — restarting the cell is not optional." });',
+  '    text({ ...d, do: "Nobody addressed you; these arrived while you held. Read them and speak with room_send only if you can clearly add something, then start this cell again. Saying nothing is a fine answer — restarting the cell is not optional." });',
   '    break;',
   '  }',
   '  await yield_control();',
