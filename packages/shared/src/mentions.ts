@@ -78,3 +78,34 @@ export function wakesAgent(message: AddressableMessage, selfName: string): boole
   if (target && variants.some(v => v.toLowerCase() === target.toLowerCase())) return true;
   return mentionedAgents(message.text ?? '', variants).length > 0;
 }
+
+/**
+ * The reason the filter above exists is that a room has several agents and a
+ * message is only about one of them. In a room with exactly one agent that
+ * reason is gone: there is nobody else the message could be for, and requiring
+ * an `@` makes the room's only agent the one participant who has to be
+ * addressed by name to answer a question asked directly to it.
+ *
+ * Observed 2026-09-08, one human and one agent, open mode. Three un-@'d
+ * messages got answers; the fourth — a request the agent could not fulfil —
+ * got two and a half minutes of silence and then a generic status line. The
+ * difference is not the wording. All four arrived through the branch that says
+ * "speak only if you can clearly add something. Saying nothing is a fine
+ * answer", which is a correct rule for room chatter and the wrong one for the
+ * only question in a two-participant room. The agent used it as an escape hatch
+ * on the single request it could not do, instead of saying it could not do it.
+ *
+ * The cost asymmetry that shaped `wakesAgent` also inverts here. There it was
+ * four agents burning a turn each on a message for someone else; here there is
+ * one agent, so a wake it did not need costs one turn, and a miss costs the
+ * meeting. Bounded on purpose: a second agent joining restores the @ filter.
+ */
+export function soleAgentOf(
+  participants: { name: string; client: string }[],
+  selfName: string,
+): boolean {
+  const self = selfName.trim();
+  if (!self) return false;
+  const agents = participants.filter(p => p.client === 'cc');
+  return agents.length === 1 && agents[0]!.name === self;
+}
