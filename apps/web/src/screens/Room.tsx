@@ -4,14 +4,16 @@ import { useRoom } from '../hooks/useRoom.js';
 import { useTaskBoard } from '../hooks/useTaskBoard.js';
 import { Bubble } from '../components/Bubble.js';
 import { TaskBoard, canRuleOn } from '../components/TaskBoard.js';
+import { DeliverPlanBar } from '../components/DeliverPlanBar.js';
+import { DeliverEventCard, isDeliverEvent } from '../components/DeliverEventCard.js';
 import { VoiceButton } from '../components/VoiceButton.js';
 import { MeetingCodePill } from '../components/MeetingCodePill.js';
 import { Avatar } from '../components/Avatar.js';
 import { AgentRoomLogo } from '../components/AgentRoomLogo.js';
 import { AgentJoinNotice } from '../components/AgentJoinNotice.js';
 import { colorForName, initialsFor } from '../lib/colors.js';
-import { PRESENCE_STALE_MS, PRESENCE_DISCONNECTED_MS, extractArtifacts, type Message, type MessageAttachment, type Participant, type ReplyMode, type ReplyModeConfig, type SystemEventType } from '@agent-room/shared';
-import { appendSystemMessage, directInvoke, getTurnState, hostSkipCurrent, setMuted, setReplyMode, createClient, createRoomReport, endRoom as endRoomApi, reactivateRoom as reactivateRoomApi, removeParticipant, type TurnState } from '@agent-room/upstash-client';
+import { PRESENCE_STALE_MS, PRESENCE_DISCONNECTED_MS, activeDeliverPlan, extractArtifacts, type Message, type MessageAttachment, type Participant, type ReplyMode, type ReplyModeConfig, type SystemEventType } from '@agent-room/shared';
+import { appendSystemMessage, directInvoke, getTurnState, hostSkipCurrent, setMuted, setReplyMode, createClient, createRoomReport, endRoom as endRoomApi, reactivateRoom as reactivateRoomApi, removeParticipant, onDeliverHostMessage, runDeliverSweep, startDeliverPlanAndWake, type TurnState } from '@agent-room/upstash-client';
 import { ENV } from '../env.js';
 import { copyText } from '../lib/copy.js';
 import { templateById } from '../lib/templates.js';
@@ -328,6 +330,35 @@ export function Room() {
     feedRef.current?.scrollTo(0, feedRef.current.scrollHeight);
   }, [messages.length]);
 
+  // Deliver mode has no server cron here. While the host's room is open, this
+  // tab runs the board sweep: reassign overdue reviews, wake the lead about an
+  // absent owner, escalate what the room cannot resolve, and post the delivery
+  // report once the plan settles. Agents run the same sweep inside
+  // room_listen; escalations are rate-limited, so both running is harmless.
+  const deliverSweepRoom = room && room.replyMode === 'deliver' && self?.name === room.createdBy && room.status !== 'ended'
+    ? room
+    : null;
+  useEffect(() => {
+    if (!deliverSweepRoom) return;
+    const client = createClient(ENV.upstash);
+    const tick = () => { void runDeliverSweep(client, code, deliverSweepRoom).catch(() => { /* best-effort */ }); };
+    tick();
+    const timer = setInterval(tick, 30_000);
+    return () => clearInterval(timer);
+  }, [code, deliverSweepRoom?.version, deliverSweepRoom?.replyMode, !!deliverSweepRoom]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function startDeliverPlan() {
+    if (!room) return;
+    try {
+      await startDeliverPlanAndWake(createClient(ENV.upstash), code, room.createdBy);
+      await taskBoard.reload();
+      await forceRefresh();
+    } catch (e) {
+      const { showToast } = await import('../components/Toast.js');
+      showToast(e instanceof Error ? `Start failed: ${e.message}` : 'Start failed');
+    }
+  }
+
   useEffect(() => {
     const mq = window.matchMedia('(min-width: 1024px)');
     const resetOnDesktop = () => {
@@ -384,6 +415,7 @@ export function Room() {
   function modeLabel(mode: ReplyMode): string {
     if (mode === 'sequential') return 'Sequential';
     if (mode === 'moderator') return 'Moderator';
+    if (mode === 'deliver') return 'Deliver';
     return 'Open';
   }
 
@@ -392,7 +424,8 @@ export function Room() {
     if (mode === 'open') return timeoutMs ? { timeoutMs } : undefined;
 
     const base: ReplyModeConfig = { ...(replyModeConfig ?? {}), ...overrides };
-    if (mode === 'sequential') {
+    // Deliver's lead is configured exactly like sequential's.
+    if (mode === 'sequential' || mode === 'deliver') {
       const leadName = overrides.leadAgentName ?? base.leadAgentName ?? fallbackAgent?.name;
       return {
         ...base,
@@ -416,7 +449,7 @@ export function Room() {
     const nextConfig = buildModeConfig(mode, overrides);
     if (mode !== 'open' && !fallbackAgent) {
       const { showToast } = await import('../components/Toast.js');
-      showToast('Add an agent before enabling Sequential or Moderator mode.');
+      showToast('Add an agent before enabling Sequential, Moderator or Deliver mode.');
       return;
     }
     setModeBusy(true);
@@ -566,6 +599,13 @@ export function Room() {
     setAttachments([]);
     try {
       await sendMessage(msg);
+      // Deliver: the host's message is either the go for a waiting plan
+      // ("Start" / 开工) or a goal the lead should plan for.
+      if (isHost && replyMode === 'deliver') {
+        void onDeliverHostMessage(createClient(ENV.upstash), code, activeRoom, body)
+          .then(() => taskBoard.reload())
+          .catch(() => { /* best-effort */ });
+      }
     } catch (e) {
       const { showToast } = await import('../components/Toast.js');
       showToast(e instanceof Error ? `Send failed: ${e.message}` : 'Send failed');
@@ -794,11 +834,12 @@ export function Room() {
                       <option value="open">Open</option>
                       <option value="sequential">Sequential</option>
                       <option value="moderator">Moderator</option>
+                      <option value="deliver">Deliver</option>
                     </select>
-                    {replyMode === 'sequential' && (
+                    {(replyMode === 'sequential' || replyMode === 'deliver') && (
                       <select
                         value={selectedLeadAgentName}
-                        onChange={e => { void updateReplyMode('sequential', { leadAgentName: e.target.value, leadAgentClient: 'cc' }); }}
+                        onChange={e => { void updateReplyMode(replyMode, { leadAgentName: e.target.value, leadAgentClient: 'cc' }); }}
                         disabled={modeBusy || activeRoomAgents.length === 0}
                         className="h-11 sm:h-9 w-full rounded-lg border border-border bg-white px-2.5 text-[15px] sm:text-xs font-semibold text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent-tint disabled:opacity-60"
                         aria-label="Lead agent"
@@ -825,7 +866,7 @@ export function Room() {
                         ))}
                       </select>
                     )}
-                    {replyMode !== 'open' && (
+                    {replyMode !== 'open' && replyMode !== 'deliver' && (
                       <div className="rounded-md border border-border-faint bg-white px-2 py-1.5">
                         <div className="flex items-center justify-between gap-2">
                           <div className="min-w-0">
@@ -987,6 +1028,14 @@ export function Room() {
               {ended && <span className="text-[10px] font-semibold text-red-500">Ended</span>}
             </div>
 
+            {replyMode === 'deliver' && (
+              <DeliverPlanBar
+                board={taskBoard.board}
+                canStart={isHost && !ended}
+                onStart={startDeliverPlan}
+                onOpenBoard={() => setMobilePanel('tasks')}
+              />
+            )}
             <div ref={feedRef} className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden p-3 sm:p-5 flex flex-col gap-3 bg-surface-soft relative">
               {(() => {
                 // Names that appear with more than one client in the room get
@@ -998,14 +1047,24 @@ export function Room() {
                 }
                 const ambiguousNames = new Set<string>();
                 for (const [n, cs] of byName) if (cs.size > 1) ambiguousNames.add(n);
-                return messages.map(m => (
+                const waitingPlan = activeDeliverPlan(taskBoard.board);
+                const startPlanId = isHost && waitingPlan && !waitingPlan.startedAt ? waitingPlan.id : undefined;
+                return messages.map(m => (isDeliverEvent(m) ? (
+                  <DeliverEventCard
+                    key={m.id}
+                    message={m}
+                    onViewTaskBoard={() => setMobilePanel('tasks')}
+                    onStart={startPlanId ? startDeliverPlan : undefined}
+                    startPlanId={startPlanId}
+                  />
+                ) : (
                   <Bubble
                     key={m.id}
                     message={m}
                     self={m.name === self.name}
                     ambiguousNames={ambiguousNames}
                   />
-                ));
+                )));
               })()}
 
               {messages.length === 0 && (
@@ -1259,6 +1318,7 @@ export function Room() {
             */}
             <TaskBoard
               code={code}
+              room={activeRoom}
               me={me}
               isHost={isHost}
               ended={ended}

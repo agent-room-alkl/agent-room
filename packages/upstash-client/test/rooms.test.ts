@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { AVATAR_PALETTE, type Room } from '@agent-room/shared';
-import { createClient, createRoom, getRoom, RoomNotFoundError, casRoom, ConcurrencyError, joinRoom, InterviewRoomBusyError } from '../src/index.js';
+import { createClient, createRoom, getRoom, RoomNotFoundError, casRoom, ConcurrencyError, joinRoom, InterviewRoomBusyError, taskRoleSeatProblem } from '../src/index.js';
 
 const ENV = { url: 'https://example.upstash.io', token: 't' };
 
@@ -411,5 +411,20 @@ describe('joinRoom', () => {
 
       expect(updated.participants).toHaveLength(3);
     });
+  });
+});
+
+describe('taskRoleSeatProblem', () => {
+  it('accepts seated agents and refuses a name that is not on the roster', () => {
+    const room = {
+      participants: [
+        { name: 'Robin', client: 'web' as const, role: 'Host', color: '#111', initials: 'RO', joinedAt: 1, lastSeenAt: 1, canSpeak: true },
+        { name: 'Claude', client: 'cc' as const, role: 'Lead', color: '#111', initials: 'CL', joinedAt: 2, lastSeenAt: 2, canSpeak: true },
+        { name: 'Codex', client: 'cc' as const, role: 'Owner', color: '#111', initials: 'CO', joinedAt: 3, lastSeenAt: 3, canSpeak: true },
+      ],
+    };
+    expect(taskRoleSeatProblem(room, 'Claude', 'Codex')).toBeNull();
+    expect(taskRoleSeatProblem(room, 'Gemini', 'Codex')).toMatch(/Gemini is not an agent in this room/);
+    expect(taskRoleSeatProblem(room, 'Claude', 'Robin')).toMatch(/Robin is not an agent in this room/);
   });
 });

@@ -50,6 +50,10 @@ const OPEN_ONE =
   'BOARD: nothing on the board is yours. If what was just asked of you is work, it is a task — '
   + `open it yourself, nobody assigns them here: ${CREATE_CALL}`;
 
+const DELIVER_WAIT =
+  'BOARD: nothing on the board is yours. In deliver mode the lead opens the plan — '
+  + 'do not create a parallel task. Keep room_listen until the plan-start names you.';
+
 function isFor(who: string | undefined, name: string): boolean {
   return Boolean(who) && who!.trim().toLowerCase() === name.trim().toLowerCase();
 }
@@ -74,11 +78,14 @@ function isFor(who: string | undefined, name: string): boolean {
 export function taskInboxFor(
   board: Pick<TaskBoard, 'tasks'> | null | undefined,
   name: string,
-  opts: { addressed?: boolean } = {},
+  opts: { addressed?: boolean; replyMode?: string } = {},
 ): TaskInbox {
   const empty: TaskInbox = { toVerify: [], toDo: [], current: [], queued: [], hint: '' };
   if (!name.trim()) return empty;
-  if (!board?.tasks?.length) return opts.addressed ? { ...empty, hint: OPEN_ONE } : empty;
+  if (!board?.tasks?.length) {
+    if (!opts.addressed) return empty;
+    return { ...empty, hint: opts.replyMode === 'deliver' ? DELIVER_WAIT : OPEN_ONE };
+  }
 
   const toVerify: string[] = [];
   const active: string[] = [];
@@ -100,6 +107,7 @@ export function taskInboxFor(
   const toDo = [...active, ...queued];
   if (!toVerify.length && !toDo.length) {
     if (!opts.addressed) return empty;
+    if (opts.replyMode === 'deliver') return { ...empty, hint: DELIVER_WAIT };
     // Somebody else's unclaimed todo is takeable; otherwise open your own.
     const free = (board.tasks as Task[]).filter(t => t.state === 'todo' && !isFor(t.owner, name));
     if (!free.length) return { ...empty, hint: OPEN_ONE };

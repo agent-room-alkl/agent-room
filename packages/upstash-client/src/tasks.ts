@@ -14,8 +14,8 @@
 //   - verifyTask is the ONLY way to reach 'done' / 'rejected', and it rejects
 //     (NotVerifierError) anyone who is not the task's designated verifier — and
 //     always rejects the owner verifying their own task (OwnerCannotVerifyError).
-import type { ClientKind, SubTask, Task, TaskBoard, TaskEvidence, TaskRoleChange, TaskState } from '@agent-room/shared';
-import { ROOM_TTL_SECONDS, TASK_BLOCK_DEMOTE_THRESHOLD } from '@agent-room/shared';
+import type { ClientKind, DeliverEscalationKind, DeliverPlan, SubTask, Task, TaskBoard, TaskEvidence, TaskRoleChange, TaskState, TaskVerdict } from '@agent-room/shared';
+import { ROOM_TTL_SECONDS, TASK_BLOCK_DEMOTE_THRESHOLD, activeDeliverPlan, verifyNoteProblem } from '@agent-room/shared';
 import type { UpstashClient } from './client.js';
 import { ConcurrencyError, UpstashError } from './errors.js';
 
@@ -56,6 +56,9 @@ export class VerifierCannotClaimError extends UpstashError {
     );
     this.name = 'VerifierCannotClaimError';
   }
+}
+export class VerifyNoteRequiredError extends UpstashError {
+  constructor(message: string) { super(message); this.name = 'VerifyNoteRequiredError'; }
 }
 export class TaskStateError extends UpstashError {
   constructor(message: string) { super(message); this.name = 'TaskStateError'; }
@@ -239,6 +242,11 @@ export interface CreateTaskInput {
   verifierClient?: ClientKind;
   dod?: string;
   createdBy: string;
+  /**
+   * Deliver rooms. The task joins the active plan; with no active plan, a task
+   * from the lead (`openAs`) opens a new one, started at once when autoStart.
+   */
+  deliverPlan?: { openAs?: string; autoStart: boolean };
 }
 
 function nextTaskId(board: TaskBoard): string {
@@ -255,7 +263,7 @@ export async function createTask(
   code: string,
   input: CreateTaskInput,
   now: number = Date.now(),
-): Promise<{ board: TaskBoard; task: Task }> {
+): Promise<{ board: TaskBoard; task: Task; plan?: DeliverPlan; planOpened?: boolean }> {
   // Validate before touching Redis so a bad creation fails fast. A task whose
   // designated verifier IS the owner would be self-verifiable, defeating the
   // whole evidence gate — verifyTask would then let the producer rule on their
@@ -268,9 +276,27 @@ export async function createTask(
     );
   }
   let created: Task;
+  let plan: DeliverPlan | undefined;
+  let planOpened = false;
   const board = await casTaskBoard(client, code, (current) => {
     const id = input.id?.trim() || nextTaskId(current);
     if (current.tasks.some(t => t.id === id)) throw new TaskExistsError(id);
+    let plans = current.plans;
+    plan = undefined;
+    planOpened = false;
+    if (input.deliverPlan) {
+      plan = activeDeliverPlan(current);
+      if (!plan && input.deliverPlan.openAs) {
+        plan = {
+          id: `P-${String((current.plans?.length ?? 0) + 1).padStart(2, '0')}`,
+          lead: input.deliverPlan.openAs,
+          createdAt: now,
+          ...(input.deliverPlan.autoStart ? { startedAt: now, startedBy: 'autoStart' } : {}),
+        };
+        plans = [...(current.plans ?? []), plan];
+        planOpened = true;
+      }
+    }
     created = {
       id,
       title: input.title,
@@ -283,12 +309,62 @@ export async function createTask(
       createdBy: input.createdBy,
       createdAt: now,
       updatedAt: now,
+      ...(plan ? { planId: plan.id } : {}),
     };
-    return { ...current, tasks: [...current.tasks, created], lastProgressAt: now };
+    return { ...current, tasks: [...current.tasks, created], lastProgressAt: now, ...(plans ? { plans } : {}) };
   });
   // Index this room for the periodic board-review sweep (best-effort).
   await registerBoardRoom(client, code).catch(() => { /* best-effort */ });
-  return { board, task: created! };
+  return { board, task: created!, ...(plan ? { plan, planOpened } : {}) };
+}
+
+// ── Deliver plans ──
+
+/** The host's go: owners of the active plan may start. */
+export async function startDeliverPlan(
+  client: UpstashClient,
+  code: string,
+  by: string,
+  now: number = Date.now(),
+): Promise<{ board: TaskBoard; plan: DeliverPlan; tasks: Task[] }> {
+  let started: DeliverPlan;
+  const board = await casTaskBoard(client, code, (current) => {
+    const plan = activeDeliverPlan(current);
+    if (!plan) throw new TaskStateError('There is no plan to start — the lead has not created one yet.');
+    if (plan.startedAt) throw new TaskStateError(`Plan ${plan.id} has already started.`);
+    if (!current.tasks.some(t => t.planId === plan.id)) throw new TaskStateError(`Plan ${plan.id} has no tasks yet.`);
+    started = { ...plan, startedAt: now, startedBy: by };
+    return { ...current, plans: (current.plans ?? []).map(p => (p.id === plan.id ? started : p)), lastProgressAt: now };
+  });
+  return { board, plan: started!, tasks: board.tasks.filter(t => t.planId === started!.id) };
+}
+
+/** Stamp reportedAt. True only for the caller that stamped it, so the report posts once. */
+export async function markDeliverPlanReported(
+  client: UpstashClient,
+  code: string,
+  planId: string,
+  now: number = Date.now(),
+): Promise<boolean> {
+  let won = false;
+  await casTaskBoard(client, code, (current) => {
+    won = false;
+    const plan = current.plans?.find(p => p.id === planId);
+    if (!plan || plan.reportedAt) return current;
+    won = true;
+    return { ...current, plans: current.plans!.map(p => (p.id === planId ? { ...p, reportedAt: now } : p)) };
+  });
+  return won;
+}
+
+/** The host stated a goal (deliver). Starts the lead's plan clock. */
+export async function recordDeliverGoal(client: UpstashClient, code: string, now: number = Date.now()): Promise<void> {
+  await casTaskBoard(client, code, current => ({ ...current, deliverGoalAt: now }));
+  await registerBoardRoom(client, code).catch(() => { /* best-effort */ });
+}
+
+export async function recordDeliverGoalEscalated(client: UpstashClient, code: string, now: number = Date.now()): Promise<void> {
+  await casTaskBoard(client, code, current => ({ ...current, deliverGoalEscalatedAt: now }));
 }
 
 // A producer claims a task → 'in_progress'. Records ownership if not already set.
@@ -313,7 +389,7 @@ export async function claimTask(
     const task = findTask(current, id);
     if (task.state === 'done' || task.state === 'rejected' || task.state === 'cancelled') {
       throw new TaskStateError(
-        `Task ${id} is ${task.state}; reopen it (host Set state) before claiming.`,
+        `Task ${id} is ${task.state}; reopen it (room_task reopen or host Set state) before claiming.`,
       );
     }
     if (task.state === 'awaiting_review') {
@@ -435,7 +511,7 @@ export async function reassignTaskRoles(
     const task = findTask(current, id);
     if (task.state === 'done') throw new TaskDoneImmutableError(id);
     if (task.state === 'rejected' || task.state === 'cancelled') {
-      throw new TaskStateError(`Task ${id} is ${task.state} — reopen it before reassigning roles.`);
+      throw new TaskStateError(`Task ${id} is ${task.state} — reopen it to todo or in_progress before changing owner/verifier.`);
     }
     // Validate the RESULT of applying the patch — a new owner colliding with
     // the existing verifier (or vice versa) is self-verifiable when another
@@ -461,6 +537,9 @@ export async function reassignTaskRoles(
       ...task,
       ...(newOwner !== undefined ? { owner: newOwner, ownerClient: patch.ownerClient } : {}),
       ...(newVerifier !== undefined ? { verifier: newVerifier, verifierClient: patch.verifierClient } : {}),
+      // A new verifier gets the full review window, not what the old one left.
+      ...(newVerifier !== undefined && newVerifier !== task.verifier && task.state === 'awaiting_review'
+        ? { reviewRequestedAt: now } : {}),
       ...(audit.length ? { roleHistory: [...(task.roleHistory ?? []), ...audit] } : {}),
       updatedAt: now,
     };
@@ -485,6 +564,7 @@ export async function cancelTask(
   actor: { name: string; client: ClientKind },
   reason?: string,
   now: number = Date.now(),
+  options: { allowEvidence?: boolean } = {},
 ): Promise<{ board: TaskBoard; task: Task }> {
   let updated: Task;
   const board = await casTaskBoard(client, code, (current) => {
@@ -493,7 +573,7 @@ export async function cancelTask(
     if (task.state === 'cancelled') {
       throw new TaskStateError(`Task ${id} is already cancelled.`);
     }
-    if (taskHasSubmittedEvidence(task)) {
+    if (taskHasSubmittedEvidence(task) && !options.allowEvidence) {
       throw new TaskStateError(
         `Task ${id} has submitted evidence — reopen it to todo/in_progress before cancelling.`,
       );
@@ -605,6 +685,7 @@ export async function submitTask(
       ownerClient: task.ownerClient ?? submitter.client,
       state: 'awaiting_review',
       evidence: fullEvidence,
+      reviewRequestedAt: now,
       updatedAt: now,
     };
     return { ...replaceTask(current, updated), lastProgressAt: now };
@@ -638,11 +719,30 @@ export async function submitForReview(
       ownerClient: task.ownerClient ?? submitter.client,
       state: 'awaiting_review',
       readinessNote: clean,
+      reviewRequestedAt: now,
       updatedAt: now,
     };
     return { ...replaceTask(current, updated), lastProgressAt: now };
   });
   return { board, task: updated! };
+}
+
+export interface VerifyTaskOptions {
+  /**
+   * Deliver-mode rules. A done verdict needs a note that says what was
+   * re-checked, and a reject sends the task back to its owner (in_progress)
+   * until the maxRejects-th one, which keeps it rejected for the host.
+   */
+  deliver?: { maxRejects: number };
+}
+
+export interface VerifyTaskResult {
+  board: TaskBoard;
+  task: Task;
+  /** Deliver: the reject returned the task to its owner. */
+  returnedToOwner?: boolean;
+  /** Deliver: the reject was the maxRejects-th; the task needs the host. */
+  rejectLimitReached?: boolean;
 }
 
 // The ONLY path to 'done' / 'rejected'. Enforces:
@@ -657,8 +757,16 @@ export async function verifyTask(
   verdict: 'done' | 'rejected',
   note: string | undefined,
   now: number = Date.now(),
-): Promise<{ board: TaskBoard; task: Task }> {
+  options: VerifyTaskOptions = {},
+): Promise<VerifyTaskResult> {
+  const deliver = options.deliver;
+  if (deliver && verdict === 'done') {
+    const problem = verifyNoteProblem(note);
+    if (problem) throw new VerifyNoteRequiredError(problem);
+  }
   let updated: Task;
+  let returnedToOwner = false;
+  let rejectLimitReached = false;
   const board = await casTaskBoard(client, code, (current) => {
     const task = findTask(current, id);
     if (task.state === 'done' || task.state === 'cancelled') throw new TaskDoneImmutableError(id);
@@ -680,15 +788,49 @@ export async function verifyTask(
       && (task.verifierClient === undefined || task.verifierClient === verifier.client))) {
       throw new NotVerifierError(id, task.verifier);
     }
-    updated = {
-      ...task,
-      state: verdict === 'done' ? 'done' : 'rejected',
-      verdict: { verdict, note, by: verifier.name, byClient: verifier.client, at: now },
-      updatedAt: now,
-    };
+    const ruling: TaskVerdict = { verdict, note, by: verifier.name, byClient: verifier.client, at: now };
+    if (deliver && verdict === 'rejected') {
+      const rejectCount = (task.rejectCount ?? 0) + 1;
+      rejectLimitReached = rejectCount >= deliver.maxRejects;
+      returnedToOwner = !rejectLimitReached;
+      updated = {
+        ...task,
+        state: rejectLimitReached ? 'rejected' : 'in_progress',
+        verdict: ruling,
+        rejectCount,
+        rejections: [...(task.rejections ?? []), ruling],
+        updatedAt: now,
+      };
+    } else {
+      updated = {
+        ...task,
+        state: verdict === 'done' ? 'done' : 'rejected',
+        verdict: ruling,
+        updatedAt: now,
+      };
+    }
     return { ...replaceTask(current, updated), lastProgressAt: now };
   });
-  return { board, task: updated! };
+  return {
+    board,
+    task: updated!,
+    ...(deliver && verdict === 'rejected' ? { returnedToOwner, rejectLimitReached } : {}),
+  };
+}
+
+// Deliver-mode sweep bookkeeping: stamp the last escalation of one kind on a
+// task. Does not bump lastProgressAt — an escalation is not progress.
+export async function recordDeliverEscalation(
+  client: UpstashClient,
+  code: string,
+  id: string,
+  kind: DeliverEscalationKind,
+  now: number = Date.now(),
+): Promise<void> {
+  await casTaskBoard(client, code, (current) => {
+    const task = findTask(current, id);
+    return replaceTask(current, { ...task, escalatedAt: { ...(task.escalatedAt ?? {}), [kind]: now } });
+  });
 }
 
 // Edit a task's mutable fields and/or correct its scope. This is the path the
@@ -774,6 +916,47 @@ export class TaskDoneImmutableError extends UpstashError {
   }
 }
 
+const REOPEN_FROM = new Set<TaskState>(['rejected', 'cancelled']);
+const REOPEN_TO = new Set<TaskState>(['todo', 'in_progress', 'awaiting_review', 'blocked']);
+
+function applyReopenCleanup(task: Task, state: TaskState, now: number): Task {
+  return {
+    ...task,
+    state,
+    rejectCount: 0,
+    escalatedAt: undefined,
+    cancellation: undefined,
+    updatedAt: now,
+  };
+}
+
+/**
+ * Rejected and cancelled tasks can come back to any open state. Done stays
+ * locked. Authorization is the caller's job (any joined participant / host).
+ */
+export async function reopenTask(
+  client: UpstashClient,
+  code: string,
+  id: string,
+  state: TaskState = 'todo',
+  now: number = Date.now(),
+): Promise<{ board: TaskBoard; task: Task }> {
+  if (!REOPEN_TO.has(state)) {
+    throw new TaskStateError(`Reopen ${id} to todo, in_progress, awaiting_review, or blocked — not '${state}'.`);
+  }
+  let updated: Task;
+  const board = await casTaskBoard(client, code, (current) => {
+    const task = findTask(current, id);
+    if (task.state === 'done') throw new TaskDoneImmutableError(id);
+    if (!REOPEN_FROM.has(task.state)) {
+      throw new TaskStateError(`Task ${id} is ${task.state} — only rejected or cancelled tasks can be reopened.`);
+    }
+    updated = applyReopenCleanup(task, state, now);
+    return { ...replaceTask(current, updated), lastProgressAt: now };
+  });
+  return { board, task: updated! };
+}
+
 // Host override: the human who owns the room is the ultimate authority on the
 // board, so they may set any NOT-done task to any state — including straight
 // to 'done', bypassing the evidence gate (the gate exists to stop AGENTS from
@@ -793,18 +976,18 @@ export async function hostSetTaskState(
   let updated: Task;
   const board = await casTaskBoard(client, code, (current) => {
     const task = findTask(current, id);
-    if (task.state === 'done' || task.state === 'cancelled') throw new TaskDoneImmutableError(id);
+    if (task.state === 'done') throw new TaskDoneImmutableError(id);
     if (task.state === state) return current;
+    const reopening = REOPEN_FROM.has(task.state) && REOPEN_TO.has(state);
+    const base = reopening ? applyReopenCleanup(task, state, now) : { ...task, state, updatedAt: now };
     updated = {
-      ...task,
-      state,
+      ...base,
       ...(state === 'done' || state === 'rejected'
         ? { verdict: { verdict: state === 'done' ? 'done' as const : 'rejected' as const, note: 'Set by host', by: hostName, byClient: 'web' as ClientKind, at: now } }
         : {}),
       ...(state === 'blocked'
         ? { blocked: { by: hostName, byClient: 'web' as ClientKind, at: now, reason: 'Set by host' } }
         : {}),
-      updatedAt: now,
     };
     return { ...replaceTask(current, updated), lastProgressAt: now };
   });

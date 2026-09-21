@@ -28,6 +28,7 @@ import {
   TaskStateError,
   TaskNotFoundError,
   hostSetTaskState,
+  reopenTask,
   TaskDoneImmutableError,
 } from '../src/index.js';
 
@@ -430,6 +431,16 @@ describe('host task state override', () => {
     await hostSetTaskState(client, CODE, task.id, 'done', 'robin');
     await expect(hostSetTaskState(client, CODE, task.id, 'todo', 'robin'))
       .rejects.toBeInstanceOf(TaskDoneImmutableError);
+  });
+
+  it('host can reopen a cancelled task to todo', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    const { task } = await createTask(client, CODE, { title: 'X', createdBy: 'Claude' });
+    await cancelTask(client, CODE, task.id, { name: 'robin', client: 'web' }, 'dup');
+    const { task: opened } = await hostSetTaskState(client, CODE, task.id, 'todo', 'robin');
+    expect(opened.state).toBe('todo');
+    expect(opened.cancellation).toBeUndefined();
   });
 
   it('setting the current state is a no-op that does not throw', async () => {
@@ -879,6 +890,37 @@ describe('cancelTask (host/moderator archive to cancelled lane)', () => {
     installFakeRedis();
     const client = createClient(ENV);
     await expect(cancelTask(client, CODE, 'T-99', { name: 'Host', client: 'web' })).rejects.toBeInstanceOf(TaskNotFoundError);
+  });
+});
+
+describe('reopenTask', () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  it('reopens cancelled and rejected tasks to an open state', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    await createTask(client, CODE, { title: 'A', createdBy: 'Mod' });
+    await createTask(client, CODE, { title: 'B', createdBy: 'Mod', verifier: VERIFIER.name, verifierClient: VERIFIER.client });
+    await cancelTask(client, CODE, 'T-01', { name: 'Host', client: 'web' }, 'dup');
+    const { task: fromCancel } = await reopenTask(client, CODE, 'T-01', 'todo');
+    expect(fromCancel.state).toBe('todo');
+    expect(fromCancel.cancellation).toBeUndefined();
+
+    await submitTask(client, CODE, 'T-02', OWNER, FULL_EVIDENCE);
+    await verifyTask(client, CODE, 'T-02', VERIFIER, 'rejected', 'needs work');
+    const { task: fromReject } = await reopenTask(client, CODE, 'T-02', 'in_progress');
+    expect(fromReject.state).toBe('in_progress');
+    expect(fromReject.rejectCount).toBe(0);
+  });
+
+  it('does not reopen a todo or a done task', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    await createTask(client, CODE, { title: 'A', createdBy: 'Mod', verifier: VERIFIER.name, verifierClient: VERIFIER.client });
+    await expect(reopenTask(client, CODE, 'T-01', 'todo')).rejects.toBeInstanceOf(TaskStateError);
+    await submitTask(client, CODE, 'T-01', OWNER, FULL_EVIDENCE);
+    await verifyTask(client, CODE, 'T-01', VERIFIER, 'done', undefined);
+    await expect(reopenTask(client, CODE, 'T-01', 'todo')).rejects.toBeInstanceOf(TaskDoneImmutableError);
   });
 });
 

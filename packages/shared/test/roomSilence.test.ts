@@ -97,4 +97,40 @@ describe('shouldEndForChatSilence', () => {
   it('ends at exactly 30 minutes of silence', () => {
     expect(shouldEndForChatSilence(spoken, spoken + CHAT_SILENCE_END_MS)).toBe(true);
   });
+
+  it('does not end a room that is held open (deliver work in flight)', () => {
+    expect(shouldEndForChatSilence(spoken, spoken + CHAT_SILENCE_END_MS, null, null, true)).toBe(false);
+  });
+
+  // A room is only ever revived after the sweep ended it, and it is ended
+  // precisely because nothing was said for the whole window — so its last chat
+  // is always already outside the window. Judging a revived room on the
+  // transcript alone re-ends it on the next cron tick, five minutes later.
+  describe('after a reactivation', () => {
+    const ended = spoken + CHAT_SILENCE_END_MS;
+
+    it('survives the next cron tick, which is what used to kill it', () => {
+      // Five minutes after reviving, the last chat is already 35 minutes old.
+      // Without reactivatedAt this returned true and the room closed again.
+      expect(shouldEndForChatSilence(spoken, ended + 5 * 60_000, null, ended)).toBe(false);
+    });
+
+    it('holds for the whole window even with no new chat', () => {
+      expect(shouldEndForChatSilence(spoken, ended + CHAT_SILENCE_END_MS - 1, null, ended)).toBe(false);
+    });
+
+    it('ends again once the revived room is itself silent for the window', () => {
+      expect(shouldEndForChatSilence(spoken, ended + CHAT_SILENCE_END_MS, null, ended)).toBe(true);
+    });
+
+    it('lets chat after the revival carry the room on its own', () => {
+      const spokeAgain = ended + 60_000;
+      expect(shouldEndForChatSilence(spokeAgain, spokeAgain + CHAT_SILENCE_END_MS - 1, null, ended)).toBe(false);
+      expect(shouldEndForChatSilence(spokeAgain, spokeAgain + CHAT_SILENCE_END_MS, null, ended)).toBe(true);
+    });
+
+    it('still refuses to end a room that is currently ended', () => {
+      expect(shouldEndForChatSilence(spoken, ended + 5 * 60_000, ended, ended)).toBe(false);
+    });
+  });
 });

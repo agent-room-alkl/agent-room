@@ -38,7 +38,19 @@ export interface Participant {
 //     then assigns work to specific agents. Non-assigned agents stay silent.
 // Field is optional on Room so legacy stored rooms (written before reply-mode
 // existed) parse fine; readers should treat undefined as 'open'.
-export type ReplyMode = 'open' | 'sequential' | 'moderator' | 'consensus' | 'debate';
+//   - 'deliver': a Lead plans board tasks, owners work quietly, a different
+//     agent verifies each one, and the plan closes with one delivery report.
+//   - 'consensus' / 'debate': every seated agent speaks once per round, in
+//     join order, then the first agent writes the consensus / verdict.
+export type ReplyMode = 'open' | 'sequential' | 'moderator' | 'deliver' | 'consensus' | 'debate';
+
+/** Stored value → a mode this server runs; unknown/missing (and the sunset 'game') → open. */
+export function normalizeReplyMode(mode: string | null | undefined): ReplyMode {
+  if (mode === 'sequential' || mode === 'moderator' || mode === 'deliver' || mode === 'consensus' || mode === 'debate') {
+    return mode;
+  }
+  return 'open';
+}
 
 // Per-message marker for which role this message played in the turn machine.
 // Used both for UI tagging and for prompt construction (e.g. a supplement
@@ -91,7 +103,11 @@ export type SystemEventType =
   | 'login_nudge'
   | 'moderator_handoff'  // moderator timed out / left — floor handed to a deputy
   | 'task_update'        // evidence-gated task board changed state
-  | 'project_prompt_updated'; // host set/cleared the room's project prompt
+  | 'project_prompt_updated' // host set/cleared the room's project prompt
+  | 'deliver_verifier_reassigned' // deliver: an overdue review moved to a present agent
+  | 'deliver_escalated'  // deliver: the room could not resolve a task on its own
+  | 'deliver_plan'       // deliver: a plan opened, or started
+  | 'deliver_report';    // deliver: every task in the plan is settled
 
 // Default per-role timeout values (in ms). Used when a room hasn't been
 // configured with custom overrides. Agent turns can involve real code edits,
@@ -159,6 +175,15 @@ export interface ReplyModeConfig {
   // DEFAULT_LEAD_GRACE_MS. Must satisfy 0 <= leadGraceMs <= lead deadline
   // (a grace window longer than the Lead's own deadline is nonsensical).
   leadGraceMs?: number;
+
+  // Deliver mode. The lead is leadAgentName/leadAgentClient (same fallback as
+  // sequential: first agent to join).
+  /** Start work as soon as the lead posts a [PLAN], without the host's go. */
+  autoStart?: boolean;
+  /** How long a task may wait for its verifier before it is reassigned. */
+  reviewTimeoutMs?: number;
+  /** Rejections after which a task goes to the host instead of back to its owner. */
+  maxRejects?: number;
 }
 
 export interface Room {
@@ -256,6 +281,10 @@ export interface MessageMetadata {
   demoContinueAction?: 'run_builder' | 'run_reviewer' | 'run_artifact';
   /** Hosted demo: scenario id for the current guided session. */
   demoScenarioId?: string;
+  /** Deliver events: the task / plan the message is about, and why it escalated. */
+  taskId?: string;
+  planId?: string;
+  escalationReason?: DeliverEscalationKind;
 }
 
 export interface DemoScenarioButton {
@@ -446,6 +475,8 @@ export interface TaskLease {
   handoff?: TaskLeaseHandoffRequest;
 }
 
+export type DeliverEscalationKind = 'no_verifier' | 'owner_stale' | 'max_rejects' | 'no_plan';
+
 export interface Task {
   id: string;            // short human id, e.g. "T-01"
   title: string;
@@ -473,6 +504,18 @@ export interface Task {
   // hatch). Optional + append-only, so boards created before this field
   // existed keep working unchanged.
   roleHistory?: TaskRoleChange[];
+  // Deliver mode. When the task last entered awaiting_review — the clock the
+  // sweep measures a slow review against (reset when the verifier changes).
+  reviewRequestedAt?: number;
+  // Deliver mode: a reject sends the task back to its owner and counts here;
+  // the maxRejects-th one keeps it rejected and escalates to the host.
+  rejectCount?: number;
+  rejections?: TaskVerdict[];
+  // Deliver mode: last escalation per kind, so the sweep says it once per
+  // DELIVER_ESCALATION_COOLDOWN_MS rather than on every poll.
+  escalatedAt?: Partial<Record<DeliverEscalationKind, number>>;
+  // Deliver mode: the plan this task belongs to (TaskBoard.plans).
+  planId?: string;
   // Server-enforced exclusive turn on this task. Historical terminal leases
   // remain attached until a later claim replaces them.
   lease?: TaskLease;
@@ -517,6 +560,24 @@ export interface TaskBoard {
   // so we skip the review instead of burning a full moderator/leader LLM call
   // re-checking an unchanged board every minute (idle token waste).
   lastReviewMsgCount?: number;
+  // Deliver mode: the lead's plans, oldest first. The active one is the last
+  // without reportedAt. Tasks join a plan through Task.planId.
+  plans?: DeliverPlan[];
+  // Deliver mode: when the host last stated a goal, and when the room was last
+  // told the lead had not answered it with a plan (once per goal).
+  deliverGoalAt?: number;
+  deliverGoalEscalatedAt?: number;
+}
+
+export interface DeliverPlan {
+  id: string;            // "P-01"
+  lead: string;
+  createdAt: number;
+  /** Owners are woken only once the plan starts (host go, or autoStart). */
+  startedAt?: number;
+  startedBy?: string;
+  /** Every task done or cancelled and the delivery report posted. */
+  reportedAt?: number;
 }
 
 // Board-sweep tuning (ms). A board with open tasks that hasn't progressed in
@@ -614,4 +675,23 @@ export interface RoomReport {
   artifacts: RoomArtifact[];
   transcript: Message[];
   retro?: RoomRetro;
+  /** Deliver rooms: the latest plan, task by task. */
+  deliverPlan?: ReportDeliverPlan;
+}
+
+export interface ReportDeliverPlan {
+  id: string;
+  lead: string;
+  startedAt?: number;
+  reportedAt?: number;
+  tasks: Array<{
+    id: string;
+    title: string;
+    state: TaskState;
+    owner?: string;
+    verifier?: string;
+    verifyNote?: string;
+    evidence?: string;
+    rejectCount?: number;
+  }>;
 }
