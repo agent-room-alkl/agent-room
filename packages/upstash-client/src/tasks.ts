@@ -6,8 +6,9 @@
 // described in @agent-room/shared's Task types. The whole point is that the
 // rules below cannot be talked around by an agent — they are checked here, not
 // in a prompt:
-//   - submitTask REQUIRES three non-empty evidence parts; missing any part
-//     throws EvidenceIncompleteError and the task does not move.
+//   - submitTask REQUIRES the artifact half (fileListing + fileExcerpt) plus
+//     proof of checking — a run (runOutput + exitCode) or written checks;
+//     missing either half throws EvidenceIncompleteError and the task does not move.
 //   - A producer can only reach 'awaiting_review'. There is no code path that
 //     lets the owner set 'done'.
 //   - verifyTask is the ONLY way to reach 'done' / 'rejected', and it rejects
@@ -26,7 +27,11 @@ export class TaskExistsError extends UpstashError {
 }
 export class EvidenceIncompleteError extends UpstashError {
   constructor(missing: string) {
-    super(`Evidence incomplete: ${missing}. A submission must include a non-empty fileListing, fileExcerpt, and runOutput (with an exitCode).`);
+    super(
+      `Evidence incomplete: ${missing}. A submission needs fileListing and fileExcerpt, `
+      + 'plus either runOutput with a numeric exitCode, or checks — each done-when '
+      + 'criterion and how you verified it.',
+    );
     this.name = 'EvidenceIncompleteError';
   }
 }
@@ -70,6 +75,14 @@ function claimerIsDesignatedVerifier(
   return task.verifierClient === claimer.client;
 }
 
+/**
+ * Case/whitespace-tolerant agent-name match. Room display names are user-typed, so
+ * exact equality would let "qwen" act as if it were "Qwen".
+ */
+function sameAgentName(a: string | undefined, b: string): boolean {
+  return Boolean(a?.trim()) && a!.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
 // Now that casWriteTaskBoard is a real CAS that rejects on conflict, the
 // important mutations (claim/submit/verify/reassign) must survive a few lost
 // races under contention (poll review + cron + multiple agents writing). 3 was
@@ -87,10 +100,24 @@ function taskBoardKey(code: string): string {
 // deploy doesn't leak it forever.
 const BOARD_ROOMS_KEY = 'task-board:rooms';
 
+async function roomRetentionSeconds(client: UpstashClient, code: string): Promise<number> {
+  const raw = await client.command<string | null>(['GET', `room:${code}`]);
+  if (!raw) return ROOM_TTL_SECONDS;
+  try {
+    const value = (JSON.parse(raw) as { retentionSeconds?: unknown }).retentionSeconds;
+    return typeof value === 'number' && Number.isFinite(value) && value > 0
+      ? Math.floor(value)
+      : ROOM_TTL_SECONDS;
+  } catch {
+    return ROOM_TTL_SECONDS;
+  }
+}
+
 export async function registerBoardRoom(client: UpstashClient, code: string): Promise<void> {
+  const ttlSeconds = await roomRetentionSeconds(client, code);
   await client.pipeline([
     ['SADD', BOARD_ROOMS_KEY, code],
-    ['EXPIRE', BOARD_ROOMS_KEY, ROOM_TTL_SECONDS],
+    ['EXPIRE', BOARD_ROOMS_KEY, ttlSeconds],
   ]);
 }
 
@@ -143,12 +170,13 @@ async function casWriteTaskBoard(
   expectedRaw: string | null,
   nextRaw: string,
 ): Promise<boolean> {
+  const ttlSeconds = await roomRetentionSeconds(client, code);
   const res = await client.command<number>([
     'EVAL', CAS_SCRIPT, '1', taskBoardKey(code),
     expectedRaw === null ? 'absent' : 'present',
     expectedRaw ?? '',
     nextRaw,
-    String(ROOM_TTL_SECONDS),
+    String(ttlSeconds),
   ]);
   return Number(res) === 1;
 }
@@ -266,6 +294,13 @@ export async function createTask(
 // A producer claims a task → 'in_progress'. Records ownership if not already set.
 // Rejects when the claimer is the designated verifier — otherwise owner==verifier
 // and the task can never be verified (T-13 deadlock). Mirrors createTask's guard.
+// Terminal states (done / rejected) require an explicit host reopen before claim.
+//
+// T-03: these guards used to live only in the hosted path (evaluateClaimGuard),
+// so the MCP/API taskClaim route — which calls this directly — could steal a
+// task another agent was actively working on, or yank a submission back out of
+// review before its verifier ruled. The state machine belongs here, at the one
+// place every caller goes through.
 export async function claimTask(
   client: UpstashClient,
   code: string,
@@ -276,8 +311,24 @@ export async function claimTask(
   let updated: Task;
   const board = await casTaskBoard(client, code, (current) => {
     const task = findTask(current, id);
-    if (task.state === 'done') {
-      throw new TaskStateError(`Task ${id} is already done; reopen it before claiming.`);
+    if (task.state === 'done' || task.state === 'rejected' || task.state === 'cancelled') {
+      throw new TaskStateError(
+        `Task ${id} is ${task.state}; reopen it (host Set state) before claiming.`,
+      );
+    }
+    if (task.state === 'awaiting_review') {
+      throw new TaskStateError(
+        `Task ${id} is awaiting_review — its verifier must rule before it can be claimed again.`,
+      );
+    }
+    // A `todo` owned by someone else stays claimable on purpose (nominal
+    // ownership of unstarted work must not deadlock the board — see the note on
+    // evaluateClaimGuard). `in_progress` is different: somebody is actually
+    // working on it, and silently reassigning it loses their work.
+    if (task.state === 'in_progress' && task.owner && !sameAgentName(task.owner, owner.name)) {
+      throw new TaskStateError(
+        `Task ${id} is in_progress under ${task.owner} — ask the host to reassign it instead of claiming it.`,
+      );
     }
     if (claimerIsDesignatedVerifier(task, owner)) {
       throw new VerifierCannotClaimError(id, task.verifier!);
@@ -358,12 +409,11 @@ export interface ReassignTaskRolesPatch {
 // task's roleHistory so the escape hatch stays auditable (who, when, from → to).
 //
 // AUTHORIZATION IS THE CALLER'S JOB (api/room.ts gates this on the proven
-// host or the room's configured Moderator/Lead resolved from stored room
-// state) — this function only enforces the state machine:
-//   - a 'done' task is locked (TaskDoneImmutableError), same as host edits;
-//   - the RESULTING owner and verifier must differ (the same case-insensitive
-//     guard createTask applies), so a reassignment can never make a task
-//     self-verifiable and defeat the evidence gate.
+// host or any joined room participant) — this function only enforces the
+// state machine:
+//   - terminal states ('done', 'rejected') are locked;
+//   - the RESULTING owner and verifier must differ when the room has more than
+//     one eligible agent (client === 'cc'); solo-agent rooms may self-review.
 export async function reassignTaskRoles(
   client: UpstashClient,
   code: string,
@@ -371,6 +421,7 @@ export async function reassignTaskRoles(
   patch: ReassignTaskRolesPatch,
   actor: { name: string; client: ClientKind },
   now: number = Date.now(),
+  eligibleAgentCount?: number,
 ): Promise<{ board: TaskBoard; task: Task }> {
   const newOwner = patch.owner?.trim();
   const newVerifier = patch.verifier?.trim();
@@ -383,13 +434,18 @@ export async function reassignTaskRoles(
   const board = await casTaskBoard(client, code, (current) => {
     const task = findTask(current, id);
     if (task.state === 'done') throw new TaskDoneImmutableError(id);
+    if (task.state === 'rejected' || task.state === 'cancelled') {
+      throw new TaskStateError(`Task ${id} is ${task.state} — reopen it before reassigning roles.`);
+    }
     // Validate the RESULT of applying the patch — a new owner colliding with
-    // the existing verifier (or vice versa) is just as self-verifiable as
-    // setting both at once. Mirrors the createTask owner==verifier guard.
+    // the existing verifier (or vice versa) is self-verifiable when another
+    // agent could verify. Solo-agent rooms (eligibleAgentCount === 1) may
+    // assign the same participant to both roles.
     const resultingOwner = newOwner ?? task.owner;
     const resultingVerifier = newVerifier ?? task.verifier;
     if (resultingOwner && resultingVerifier
-      && resultingOwner.trim().toLowerCase() === resultingVerifier.trim().toLowerCase()) {
+      && resultingOwner.trim().toLowerCase() === resultingVerifier.trim().toLowerCase()
+      && eligibleAgentCount !== 1) {
       throw new TaskStateError(
         `Task verifier (${resultingVerifier}) must be different from the owner (${resultingOwner}) — a producer cannot verify their own delivery.`,
       );
@@ -411,17 +467,6 @@ export async function reassignTaskRoles(
     return { ...replaceTask(current, updated), lastProgressAt: now };
   });
   return { board, task: updated! };
-}
-
-// 'cancelled' is terminal: an archived task must be reopened (updateTask) before
-// new work can be submitted against it. Without this guard, cancelling a task and
-// then submitting evidence would silently resurrect it into awaiting_review.
-function assertNotCancelled(task: Task): void {
-  if (task.state === 'cancelled') {
-    throw new TaskStateError(
-      `Task ${task.id} is cancelled — reopen it before submitting new evidence.`,
-    );
-  }
 }
 
 /** True when a task has submitted work that must be preserved until reopen. */
@@ -470,12 +515,60 @@ export async function cancelTask(
   return { board, task: updated! };
 }
 
+/**
+ * The artifact half is always required; the check half accepts either shape.
+ *
+ * Requiring a test run made submit unreachable for every task that is not code
+ * — write a document, do the research, draft the plan — and the producer's only
+ * ways out were to stall or to invent an exitCode. Neither is evidence. `checks`
+ * (the done-when criteria and how each was verified) is a weaker guarantee than
+ * a green suite and a much stronger one than a fabricated zero.
+ *
+ * Half a run is still rejected: output with no exit code, or an exit code with
+ * no output, is a claim rather than a record.
+ */
 function assertEvidenceComplete(e: Partial<TaskEvidence>): void {
   if (!e.fileListing || !e.fileListing.trim()) throw new EvidenceIncompleteError('fileListing is empty');
   if (!e.fileExcerpt || !e.fileExcerpt.trim()) throw new EvidenceIncompleteError('fileExcerpt is empty');
-  if (!e.runOutput || !e.runOutput.trim()) throw new EvidenceIncompleteError('runOutput is empty');
-  if (typeof e.exitCode !== 'number' || !Number.isFinite(e.exitCode)) {
-    throw new EvidenceIncompleteError('exitCode is missing or not a number');
+  const hasOutput = Boolean(e.runOutput && e.runOutput.trim());
+  const hasCode = typeof e.exitCode === 'number' && Number.isFinite(e.exitCode);
+  if (hasOutput !== hasCode) {
+    throw new EvidenceIncompleteError(
+      hasOutput ? 'runOutput was given without a numeric exitCode' : 'exitCode was given without runOutput',
+    );
+  }
+  if (!hasOutput && !(e.checks && e.checks.trim())) {
+    throw new EvidenceIncompleteError(
+      'no proof of checking: give runOutput + exitCode for work with a run, or checks '
+      + '(each done-when criterion and how you verified it) for work without one',
+    );
+  }
+}
+
+/**
+ * T-03: shared submit-side state machine for submitTask / submitForReview.
+ *
+ * Two holes this closes, both reachable from the MCP/API task routes that call
+ * these directly and so never saw evaluateSubmitGuard:
+ *   - a `done` (or `cancelled`) task could be resubmitted straight back to
+ *     awaiting_review, contradicting hostSetTaskState's "done is terminal";
+ *   - anyone could submit on a task another agent had claimed.
+ * Resubmitting a `rejected` task is deliberate and stays allowed (the reject →
+ * fix → resubmit loop is the point of the gate). A `todo` task with only a
+ * nominal owner also stays submittable, same reasoning as the claim path.
+ */
+function assertCanSubmit(task: Task, submitter: { name: string }): void {
+  if (task.state === 'done') throw new TaskDoneImmutableError(task.id);
+  if (task.state === 'cancelled') {
+    throw new TaskStateError(
+      `Task ${task.id} is cancelled — the host must reopen it before new evidence can be submitted.`,
+    );
+  }
+  if ((task.state === 'in_progress' || task.state === 'awaiting_review')
+    && task.owner && !sameAgentName(task.owner, submitter.name)) {
+    throw new TaskStateError(
+      `Task ${task.id} is owned by ${task.owner} — only its owner can submit it for review.`,
+    );
   }
 }
 
@@ -495,12 +588,13 @@ export async function submitTask(
   let updated: Task;
   const board = await casTaskBoard(client, code, (current) => {
     const task = findTask(current, id);
-    assertNotCancelled(task);
+    assertCanSubmit(task, submitter);
     const fullEvidence: TaskEvidence = {
       fileListing: evidence.fileListing,
       fileExcerpt: evidence.fileExcerpt,
-      runOutput: evidence.runOutput,
-      exitCode: evidence.exitCode,
+      ...(evidence.runOutput ? { runOutput: evidence.runOutput } : {}),
+      ...(typeof evidence.exitCode === 'number' ? { exitCode: evidence.exitCode } : {}),
+      ...(evidence.checks ? { checks: evidence.checks } : {}),
       submittedBy: submitter.name,
       submittedClient: submitter.client,
       at: now,
@@ -537,7 +631,7 @@ export async function submitForReview(
   let updated: Task;
   const board = await casTaskBoard(client, code, (current) => {
     const task = findTask(current, id);
-    assertNotCancelled(task);
+    assertCanSubmit(task, submitter);
     updated = {
       ...task,
       owner: task.owner ?? submitter.name,
@@ -567,6 +661,7 @@ export async function verifyTask(
   let updated: Task;
   const board = await casTaskBoard(client, code, (current) => {
     const task = findTask(current, id);
+    if (task.state === 'done' || task.state === 'cancelled') throw new TaskDoneImmutableError(id);
     if (task.state !== 'awaiting_review') {
       throw new TaskStateError(`Task ${id} is '${task.state}', not 'awaiting_review' — nothing to verify. The producer must submit evidence first.`);
     }
@@ -644,7 +739,7 @@ export async function updateTask(
 // `blocked` stays OPEN work (it counts for end-room guards and shows on the
 // board), and it is NOT a completion claim, so there is no verifier gate.
 // Ownership enforcement lives at the marker/tool layer; reopen via updateTask
-// once the blocker is gone.
+// or a [REOPEN] marker once the blocker is gone.
 export async function blockTask(
   client: UpstashClient,
   code: string,
@@ -705,6 +800,9 @@ export async function hostSetTaskState(
       state,
       ...(state === 'done' || state === 'rejected'
         ? { verdict: { verdict: state === 'done' ? 'done' as const : 'rejected' as const, note: 'Set by host', by: hostName, byClient: 'web' as ClientKind, at: now } }
+        : {}),
+      ...(state === 'blocked'
+        ? { blocked: { by: hostName, byClient: 'web' as ClientKind, at: now, reason: 'Set by host' } }
         : {}),
       updatedAt: now,
     };
@@ -824,21 +922,16 @@ export function agentBlocks(board: TaskBoard, name: string): number {
  * Tasks that still need work — end-room guards, stall nudges, progress UI.
  * `blocked` stays included: it is open work waiting on an external unblock.
  * `rejected` is a terminal disposition (no further work unless explicitly
- * reopened), so it is excluded alongside `done` and `cancelled`.
+ * reopened), so it is excluded alongside `done`.
  */
 export function openTasks(board: TaskBoard): Task[] {
   return board.tasks.filter(t => t.state !== 'done' && t.state !== 'rejected' && t.state !== 'cancelled');
 }
 
 /**
- * True when nothing actionable remains — every task is done, rejected or
- * cancelled. Used to stop periodic board review / prune the cron index without
- * treating a mixed board as “all verified done” (that is allTasksDone).
- *
- * Derived from openTasks so the two can never disagree. They used to: this
- * function called a rejected task closed while openTasks called it open, so a
- * board with one reject could report "1 unfinished" and "nothing left to do"
- * at the same time.
+ * True when nothing actionable remains — every task is done or rejected.
+ * Used to stop periodic board review / prune the cron index without treating
+ * a mixed done+rejected board as “all verified done”.
  */
 export function boardHasNoOpenWork(board: TaskBoard): boolean {
   return openTasks(board).length === 0;
@@ -885,8 +978,9 @@ export function boardDeliveredSection(board: TaskBoard | null | undefined): stri
 }
 
 // Board summary for reminder messages / the listen payload.
-// Open tasks (todo / in_progress / awaiting_review / rejected) stay one line
-// each; verified-done tasks collapse to a single trailing "✅ N done" line.
+// Actionable open tasks (todo / in_progress / awaiting_review) stay one line
+// each; rejected terminals keep a visible history line; verified-done tasks
+// collapse to a single trailing "✅ N done" line.
 export function summarizeBoard(board: TaskBoard): string {
   const icon: Record<TaskState, string> = {
     todo: '⬜', in_progress: '🔵', awaiting_review: '🟡', blocked: '🟠', done: '✅', rejected: '🔴', cancelled: '🗑️',
@@ -897,21 +991,17 @@ export function summarizeBoard(board: TaskBoard): string {
   const doneCount = board.tasks.filter(t => t.state === 'done').length;
   const lines = [
     ...open.map((t) => {
-      // A blocked task is useless on the board without the reason it is stuck —
-      // that reason is the whole point of the state.
       const blockedSuffix = t.state === 'blocked' && t.blocked?.reason?.trim()
         ? `: ${t.blocked.reason.trim().slice(0, 80)}`
         : '';
       return `${icon[t.state]} ${t.id} ${t.title}${t.owner ? ` (@${t.owner})` : ''} — ${t.state}${blockedSuffix}`;
     }),
-    // Terminal, so not open work — but still listed, because "why was this
-    // rejected / cancelled" is the part a reader actually needs.
-    ...rejected.map((t) => {
+    ...rejected.map(t => {
       const note = t.verdict?.note?.trim();
       const noteSuffix = note ? `: ${note.slice(0, 80)}` : '';
       return `${icon.rejected} ${t.id} ${t.title}${t.owner ? ` (@${t.owner})` : ''} — rejected${noteSuffix}`;
     }),
-    ...cancelled.map((t) => {
+    ...cancelled.map(t => {
       const reason = t.cancellation?.reason?.trim();
       const reasonSuffix = reason ? `: ${reason.slice(0, 80)}` : '';
       const by = t.cancellation?.by ? ` by @${t.cancellation.by}` : '';
@@ -923,8 +1013,20 @@ export function summarizeBoard(board: TaskBoard): string {
 }
 
 // Debounce bookkeeping writes. Best-effort; callers ignore failures.
-export async function recordStallNudge(client: UpstashClient, code: string, now: number = Date.now()): Promise<void> {
-  await casTaskBoard(client, code, (current) => ({ ...current, lastStallNudgeAt: now }));
+// `newEpisode` restarts the count: the cap is meant to stop one stall being
+// nagged forever, not to spend the room's whole allowance on its first quiet
+// stretch and stay silent for the rest of the session.
+export async function recordStallNudge(
+  client: UpstashClient,
+  code: string,
+  now: number = Date.now(),
+  newEpisode = false,
+): Promise<void> {
+  await casTaskBoard(client, code, (current) => ({
+    ...current,
+    lastStallNudgeAt: now,
+    stallNudgeCount: newEpisode ? 1 : (current.stallNudgeCount ?? 0) + 1,
+  }));
 }
 
 export async function recordCompletionAnnounced(client: UpstashClient, code: string, now: number = Date.now()): Promise<void> {

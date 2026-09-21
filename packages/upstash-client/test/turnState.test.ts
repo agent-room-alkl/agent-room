@@ -187,6 +187,23 @@ describe('advanceTurn', () => {
     });
     expect(third.currentName).toBe('B');
   });
+
+  it('ends the turn when the Lead replies with [RESULT] — later phases are a cap, not a quota', () => {
+    const r = room();
+    const start = newSequentialTurn(r, 100, 1000)!;
+    const after = advanceTurn(start, 'replied', r, 2000, { result: true });
+    expect(after.currentName).toBeUndefined();
+    expect(after.queue).toEqual([]);
+    expect(after.round).toBe(1);
+    expect(after.spoken.at(-1)).toMatchObject({ name: 'Lead', status: 'replied' });
+  });
+
+  it('ignores the [RESULT] flag from a supplement', () => {
+    const r = room();
+    const second = advanceTurn(newSequentialTurn(r, 100, 1000)!, 'replied', r, 2000);
+    const third = advanceTurn(second, 'replied', r, 3000, { result: true });
+    expect(third.currentName).toBe('B');
+  });
 });
 
 describe('sequential round-robin', () => {

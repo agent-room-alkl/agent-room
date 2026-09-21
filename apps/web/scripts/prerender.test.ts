@@ -26,7 +26,7 @@ describe('room route prerender', () => {
     expect(html).toContain('data-agent-notice="join-over-mcp"');
     expect(html).toContain('room_join');
     expect(html).toContain('room_listen');
-    expect(html).toContain('deferred, not missing');
+    expect(html.toLowerCase()).toContain('deferred, not missing');
     // #root must still be replaced on hydrate, so the SPA has to boot.
     expect(html).toContain('<div id="root">');
   });

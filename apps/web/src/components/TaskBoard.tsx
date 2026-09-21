@@ -409,11 +409,16 @@ function ReviewEvidence({ task }: { task: Task }) {
             onClick={() => setOpen(v => !v)}
             className="mt-2 text-[11px] font-semibold text-amber-800 underline underline-offset-2"
           >
-            {open ? 'Hide evidence' : `Evidence from ${ev.submittedBy} (exit ${ev.exitCode})`}
+            {open
+              ? 'Hide evidence'
+              : `Evidence from ${ev.submittedBy}${typeof ev.exitCode === 'number' ? ` (exit ${ev.exitCode})` : ''}`}
           </button>
           {open && (
             <div className="mt-2 space-y-2">
-              {([['Files', ev.fileListing], ['Excerpt', ev.fileExcerpt], ['Run output', ev.runOutput]] as const).map(([label, body]) => (
+              {/* The check is a run OR a criterion-by-criterion account; show whichever was given. */}
+              {([['Files', ev.fileListing], ['Excerpt', ev.fileExcerpt], ['Run output', ev.runOutput], ['Checks', ev.checks]] as const)
+                .filter(([, body]) => Boolean(body))
+                .map(([label, body]) => (
                 <div key={label}>
                   <div className="text-[10px] font-bold uppercase tracking-wide text-amber-700">{label}</div>
                   <pre className="mt-1 max-h-40 overflow-auto rounded-md bg-ink px-2.5 py-2 text-[11px] leading-relaxed text-white/90">

@@ -1,19 +1,14 @@
-// `wakeOn: "addressed"` holds unaddressed traffic server-side and hands it back
-// in one batch at timeout. The caller cannot tell that batch from an early
-// return caused by someone actually calling on it — both arrive as "messages
-// present" — so it used to guess, with `m.text.includes("@" + name)`.
+// "Codex only answers when you @ it, in every mode" — reported 2026-09-08.
 //
-// That guess is narrower than the server's own rule. wakesAgent also matches
-// `metadata.targetAgentName`, which is how sequential and moderator modes hand
-// out turns, with no literal "@name" in the text: an agent looping on the text
-// match never woke for its own turn.
+// The listen loop decided client-side what counted as being addressed, with
+// `m.text.includes("@" + name)`. The server's wakesAgent is wider: it also
+// matches metadata.targetAgentName, which is how sequential and moderator modes
+// hand out turns — no literal "@name" anywhere in the text. So an agent looping
+// on the text match never woke for its own turn.
 //
-// And in a room with one agent the whole filter is wrong. It exists because a
-// room has several agents and a message is about one of them; with one agent
-// there is nobody else it could be for, and requiring an @ makes the room's
-// only agent the one participant who must be named to answer a question asked
-// directly to it. Observed 2026-09-08: three un-@'d messages got answers, and
-// the fourth — the one request the agent could not fulfil — got silence.
+// The caller cannot derive this. It also cannot tell an early return (someone
+// addressed me) from a held batch delivered at timeout (nobody did) — both
+// arrive as "messages present". So the server says which.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -24,7 +19,8 @@ const room = {
   createdBy: 'host',
   status: 'active' as const,
   version: 1,
-  replyMode: 'open' as const,
+  replyMode: 'open' as 'open' | 'sequential' | 'moderator' | 'consensus' | 'debate',
+  modeConfig: undefined as undefined | { moderatorAgentName: string; moderatorAgentClient: 'cc' },
   participants: [
     { name: 'host', role: '', color: '#000', initials: 'HO', client: 'web' as const, joinedAt: 0, lastSeenAt: 0, canSpeak: true },
     { name: 'Codex', role: '', color: '#002', initials: 'CO', client: 'cc' as const, joinedAt: 2, lastSeenAt: 2, canSpeak: true },
@@ -52,8 +48,6 @@ const listen = async (over: Record<string, unknown> = {}) => {
   }));
 };
 
-const claude = { name: 'Claude', role: '', color: '#003', initials: 'CL', client: 'cc' as const, joinedAt: 3, lastSeenAt: 3, canSpeak: true };
-
 describe('addressedYou', () => {
   beforeEach(() => { listMessages.mockReset(); listMessages.mockResolvedValue([]); });
 
@@ -74,17 +68,81 @@ describe('addressedYou', () => {
     expect(res.messages[0].text).not.toContain('@Codex');
   });
 
+  // "Somebody else" has to exist for this to be the case it claims to be: with
+  // one agent in the room every human message is addressed, so the roster gets
+  // a second agent here rather than the assertion getting weakened.
+  it('broadcasts host speech to every agent in open mode, even when one is mentioned', async () => {
+    room.participants.push({ name: 'Claude', role: '', color: '#003', initials: 'CL', client: 'cc', joinedAt: 3, lastSeenAt: 3, canSpeak: true });
+    listMessages.mockResolvedValue([{ ...base, type: 'msg', name: 'host', text: '@Claude what do you think' }]);
+    const res = await listen({ timeoutMs: 1000 }).finally(() => room.participants.pop());
+    expect(res.addressedYou).toBe(true);
+    expect(res.messages).toHaveLength(1);
+  });
+
+  it('is absent on wakeOn "any", where every message returns early anyway', async () => {
+    listMessages.mockResolvedValue([{ ...base, type: 'msg', name: 'host', text: '@Codex hello' }]);
+    expect((await listen({ wakeOn: 'any', timeoutMs: 1000 })).addressedYou).toBeUndefined();
+  });
+
+  // ED9-FKF-4SK, 2026-09-08: one human, one agent, open mode. "anaylis this
+  // project and give me a summary in word" arrived with no @, so it came through
+  // the branch that says "saying nothing is a fine answer" — and the agent said
+  // nothing for 2m48s, then a generic status line. There was no other agent it
+  // could have been for.
   it('treats a plain human message as addressed when you are the only agent', async () => {
-    listMessages.mockResolvedValue([{ ...base, type: 'msg', name: 'host', text: 'analyse this project' }]);
+    listMessages.mockResolvedValue([{ ...base, type: 'msg', name: 'host', text: 'anaylis this project' }]);
     expect((await listen({ timeoutMs: 1000 })).addressedYou).toBe(true);
   });
 
-  it('restores the @ filter once a second agent is in the room', async () => {
-    room.participants.push(claude);
-    listMessages.mockResolvedValue([{ ...base, type: 'msg', name: 'host', text: 'analyse this project' }]);
+  it('keeps plain host speech as a broadcast when a second agent joins', async () => {
+    room.participants.push({ name: 'Claude', role: '', color: '#003', initials: 'CL', client: 'cc', joinedAt: 3, lastSeenAt: 3, canSpeak: true });
+    listMessages.mockResolvedValue([{ ...base, type: 'msg', name: 'host', text: 'anaylis this project' }]);
+    try {
+      expect((await listen({ timeoutMs: 1000 })).addressedYou).toBe(true);
+    } finally {
+      room.participants.pop();
+    }
+  });
+
+  it.each(['sequential', 'consensus', 'debate'] as const)(
+    'broadcasts plain host speech to every agent in %s mode',
+    async (mode) => {
+      room.participants.push({ name: 'Claude', role: '', color: '#003', initials: 'CL', client: 'cc', joinedAt: 3, lastSeenAt: 3, canSpeak: true });
+      room.replyMode = mode;
+      listMessages.mockResolvedValue([{ ...base, type: 'msg', name: 'host', text: 'continue the work' }]);
+      try {
+        expect((await listen({ timeoutMs: 1000 })).addressedYou).toBe(true);
+      } finally {
+        room.replyMode = 'open';
+        room.participants.pop();
+      }
+    },
+  );
+
+  it('routes plain host speech only to the moderator in moderator mode', async () => {
+    room.participants.push({ name: 'Claude', role: '', color: '#003', initials: 'CL', client: 'cc', joinedAt: 3, lastSeenAt: 3, canSpeak: true });
+    room.replyMode = 'moderator';
+    room.modeConfig = { moderatorAgentName: 'Claude', moderatorAgentClient: 'cc' };
+    listMessages.mockResolvedValue([{ ...base, type: 'msg', name: 'host', text: 'continue' }]);
     try {
       expect((await listen({ timeoutMs: 1000 })).addressedYou).toBeUndefined();
     } finally {
+      room.replyMode = 'open';
+      room.modeConfig = undefined;
+      room.participants.pop();
+    }
+  });
+
+  it('still wakes a specifically mentioned member in moderator mode', async () => {
+    room.participants.push({ name: 'Claude', role: '', color: '#003', initials: 'CL', client: 'cc', joinedAt: 3, lastSeenAt: 3, canSpeak: true });
+    room.replyMode = 'moderator';
+    room.modeConfig = { moderatorAgentName: 'Claude', moderatorAgentClient: 'cc' };
+    listMessages.mockResolvedValue([{ ...base, type: 'msg', name: 'host', text: '@Codex verify T-01' }]);
+    try {
+      expect((await listen({ timeoutMs: 1000 })).addressedYou).toBe(true);
+    } finally {
+      room.replyMode = 'open';
+      room.modeConfig = undefined;
       room.participants.pop();
     }
   });
@@ -99,22 +157,6 @@ describe('addressedYou', () => {
   it('does not wake a sole agent on its own message', async () => {
     listMessages.mockResolvedValue([{ ...base, type: 'msg', name: 'Codex', text: '[STATUS] listening' }]);
     expect((await listen({ timeoutMs: 1000 })).addressedYou).toBeUndefined();
-  });
-
-  // "Somebody else" has to exist for this to be the case it claims to be.
-  it('is absent for room traffic aimed at somebody else', async () => {
-    room.participants.push(claude);
-    listMessages.mockResolvedValue([{ ...base, type: 'msg', name: 'host', text: '@Claude what do you think' }]);
-    const res = await listen({ timeoutMs: 1000 }).finally(() => room.participants.pop());
-    expect(res.addressedYou).toBeUndefined();
-    // Not dropped — held and handed over, so the agent can still choose to add
-    // value, which room policy explicitly allows.
-    expect(res.messages).toHaveLength(1);
-  });
-
-  it('is absent on wakeOn "any", where every message returns early anyway', async () => {
-    listMessages.mockResolvedValue([{ ...base, type: 'msg', name: 'host', text: '@Codex hello' }]);
-    expect((await listen({ wakeOn: 'any', timeoutMs: 1000 })).addressedYou).toBeUndefined();
   });
 
   it('is absent on a quiet hold', async () => {
