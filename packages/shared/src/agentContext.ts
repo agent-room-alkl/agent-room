@@ -57,7 +57,7 @@ export function composeSharedAgentContext(input: SharedAgentContextInput): strin
 // addressed", a moderator reads its own name in the host's message and just
 // answers, doing the work itself. That is the sub-agent's contract, handed to
 // the wrong reader.
-export type RoomPolicyRole = 'moderator' | 'member';
+export type RoomPolicyRole = 'moderator' | 'lead' | 'member';
 
 // What the Moderator seat is actually for. A moderator that thinks its job is
 // routing messages will route messages; saying "you are an active project
@@ -105,6 +105,12 @@ export function roomPolicySummary(
   }
   if (mode === 'debate') {
     return `[policy v${ROOM_POLICY_VERSION}] Debate mode: connected agents take strict turns in join order. Round 1 — state your own position on the motion, once. Round 2 — rebut the strongest opposing argument already posted, and concede what the evidence supports. Then the first agent writes the verdict. Speak only when you hold the floor. ${base}`;
+  }
+  if (mode === 'deliver') {
+    if (role === 'lead') {
+      return `[policy v${ROOM_POLICY_VERSION}] Deliver mode — you are the lead. When the host states a goal, reply with a [PLAN]: create board tasks, each with an owner, a DIFFERENT verifier, and a done-when. Owners start when the host starts the plan. Give an owner hours if they are implementing — silence is work, not a stall. Unblock [BLOCKER]s; escalate with [DECISION] only what you cannot decide. When every task in the plan is done, close with one [RESULT]. ${base}`;
+    }
+    return `[policy v${ROOM_POLICY_VERSION}] Deliver mode: start a task only once the plan-start message names you, then work silently on it. If you are not named, keep room_listen and wait — quiet work can last hours, and leaving because the room is silent abandons the verifier seat. Speak only with [RESULT] evidence, a [BLOCKER], or a [DECISION] request — other messages are posted as status. When you verify, re-run the check yourself and say what you ran. ${base}`;
   }
   return `[policy v${ROOM_POLICY_VERSION}] Open mode: anyone may speak. Bring your own angle; if a teammate already shipped the same deliverable, [SKIP] or review it — do not re-implement. Reply when mentioned, assigned, or clearly adding value — do not answer every message. ${base}`;
 }

@@ -201,6 +201,32 @@ export interface JoinRoomOptions {
 // was actually assigned.
 export type JoinRoomResult = Room & { participant: Participant };
 
+/** Agents the left-rail roster shows: seated cc, not muted. */
+export function seatedTaskAgents(room: Pick<Room, 'participants'>): Participant[] {
+  return room.participants.filter(p => p.client === 'cc' && p.canSpeak !== false);
+}
+
+/**
+ * Owner / verifier must be a seated agent on the current roster. Stops
+ * agents from assigning work to a name that is not in the room.
+ */
+export function taskRoleSeatProblem(
+  room: Pick<Room, 'participants'>,
+  owner?: string,
+  verifier?: string,
+): string | null {
+  const here = seatedTaskAgents(room);
+  const list = here.length ? here.map(p => p.name).join(', ') : '(no agents in the room)';
+  const seated = (name: string) => here.find(p => namesEqualIgnoreCase(p.name, name));
+  for (const [role, name] of [['owner', owner], ['verifier', verifier]] as const) {
+    if (!name?.trim()) continue;
+    if (!seated(name)) {
+      return `The ${role} ${name} is not an agent in this room. Pick one of: ${list}.`;
+    }
+  }
+  return null;
+}
+
 function namesEqualIgnoreCase(a: string, b: string): boolean {
   return a.trim().toLowerCase() === b.trim().toLowerCase();
 }
@@ -491,6 +517,20 @@ export async function setReplyMode(
     if (mode === 'moderator') {
       if (!config?.moderatorAgentName || !config?.moderatorAgentClient) {
         throw new InvalidModeConfigError('moderator', 'moderatorAgentName + moderatorAgentClient');
+      }
+    }
+    // Deliver mode needs an owner AND a different verifier for every task.
+    // With one agent nobody can verify, so refuse at the switch rather than
+    // let the host discover it at the first review. (Enforced here, in the
+    // shared core, so the MCP path is gated identically to the web UI.)
+    if (mode === 'deliver') {
+      const agents = current.participants.filter(
+        p => p.client === 'cc' && p.canSpeak !== false && p.name !== current.createdBy,
+      );
+      if (agents.length < 2) {
+        throw new ModeNotSupportedError(
+          `Deliver mode needs at least 2 connected agents in the room — this room has ${agents.length}. Connect another agent over MCP, then switch.`,
+        );
       }
     }
     if (config?.leadGraceMs !== undefined) {

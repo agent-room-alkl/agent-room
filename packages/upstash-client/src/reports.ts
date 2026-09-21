@@ -1,4 +1,4 @@
-import { extractArtifacts, type Message, type Room, type RoomReport, type TaskBoard } from '@agent-room/shared';
+import { deliverPlanTasks, extractArtifacts, latestDeliverPlan, type Message, type ReportDeliverPlan, type Room, type RoomReport, type TaskBoard } from '@agent-room/shared';
 import type { UpstashClient } from './client.js';
 import { buildRoomRetro } from './retro.js';
 import { deliverablesFromBoard, doneTasks, getTaskBoard } from './tasks.js';
@@ -53,6 +53,31 @@ export function buildRoomReport(room: Room, messages: Message[], board?: TaskBoa
     artifacts,
     retro: buildRoomRetro(room, messages, board),
     transcript: messages,
+    ...(board ? deliverPlanSection(board) : {}),
+  };
+}
+
+function deliverPlanSection(board: TaskBoard): { deliverPlan?: ReportDeliverPlan } {
+  const plan = latestDeliverPlan(board);
+  if (!plan) return {};
+  const first = (text?: string) => text?.trim().split('\n').find(Boolean)?.trim().slice(0, 200) || undefined;
+  return {
+    deliverPlan: {
+      id: plan.id,
+      lead: plan.lead,
+      startedAt: plan.startedAt,
+      reportedAt: plan.reportedAt,
+      tasks: deliverPlanTasks(board, plan.id).map(t => ({
+        id: t.id,
+        title: t.title,
+        state: t.state,
+        owner: t.owner,
+        verifier: t.verdict?.by ?? t.verifier,
+        verifyNote: t.verdict?.verdict === 'done' ? first(t.verdict.note) : undefined,
+        evidence: first(t.evidence?.fileListing) ?? first(t.readinessNote),
+        rejectCount: t.rejectCount,
+      })),
+    },
   };
 }
 

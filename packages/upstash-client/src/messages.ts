@@ -1,4 +1,4 @@
-import type { Message, MessageMetadata, RoleInTurn, InvocationType } from '@agent-room/shared';
+import type { Message, MessageMetadata, RoleInTurn, InvocationType, Room } from '@agent-room/shared';
 import { MAX_MESSAGES_PER_ROOM, ROOM_TTL_SECONDS } from '@agent-room/shared';
 import type { UpstashClient } from './client.js';
 import { findSpeaker, MutedError, NotYourTurnError, getRoom } from './rooms.js';
@@ -12,6 +12,7 @@ import {
   consumeHostDirectedDetailed,
   isGraceSupplementSpeaker,
   isHumanSender,
+  isDeliverLead,
   moderatorReply,
   newModeratorTurn,
   newSequentialTurn,
@@ -91,6 +92,16 @@ export interface AppendResult {
 //     never advances the turn. In sequential mode, when the sender is the
 //     current speaker, it also renews their turn deadline (heartbeat) — a
 //     long-running agent can signal "still working" without losing the floor.
+const DELIVER_SIGNAL = /\[(RESULT|BLOCKER|DECISION|PLAN)\]/i;
+
+/** Deliver mode: should this agent message be posted as a status note? */
+export function isDeliverQuietSend(room: Room, message: Message, kind: 'message' | 'status'): boolean {
+  if (message.client !== 'cc' || isHumanSender(room, message.name, message.client)) return false;
+  if (kind === 'status') return true;
+  if (isDeliverLead(room, message.name, message.client)) return false;
+  return !DELIVER_SIGNAL.test(message.text ?? '');
+}
+
 export async function appendMessage(
   client: UpstashClient,
   code: string,
@@ -107,12 +118,18 @@ export async function appendMessage(
   // which are driven entirely server-side by a multi-round runner rather than
   // by the turn machinery. They post via appendDemoAgentMessage with no floor
   // to wait for, exactly like open mode, so they take the same gating-free path.
-  if (mode === 'open' || mode === 'consensus' || mode === 'debate') {
+  //
+  // Deliver mode rides the same turn-less path. Its one rule is quiet
+  // execution: an agent other than the lead posts a status note unless the
+  // message carries [RESULT] / [BLOCKER] / [DECISION] / [PLAN]. The note is
+  // still stored and shown — it just does not read as, or wake, a reply.
+  if (mode === 'open' || mode === 'consensus' || mode === 'debate' || mode === 'deliver') {
+    const quiet = mode === 'deliver' && isDeliverQuietSend(room, message, kind);
     const metadata: MessageMetadata = {
       ...(message.metadata ?? {}),
       modeAtSend: mode,
-      roleAtSend: 'open',
-      invocationType: message.metadata?.invocationType ?? 'normal_turn',
+      roleAtSend: quiet ? 'status' : 'open',
+      invocationType: quiet ? 'status_update' : (message.metadata?.invocationType ?? 'normal_turn'),
     };
     const enriched: Message = { ...message, metadata };
     await rpushMessage(client, code, enriched, room.createdAt);

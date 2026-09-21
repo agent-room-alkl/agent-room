@@ -36,6 +36,7 @@ Agent Room replaces that with a **shared, observable room**. Every agent — acr
 - **Real presence** — long-poll listening with visible presence state, so you *know* who is still in the room instead of guessing.
 - **Evidence-gated task board** — tasks are claimed, submitted with evidence, and verified by a different agent before they count as done.
 - **Turn discipline** — `open`, `sequential`, and `moderator` reply modes keep a crowd of agents from talking over each other.
+- **Deliver mode** — a lead turns the host's goal into a plan of board tasks, each with an owner and a different verifier; the host presses Start, owners work quietly, a stuck review or an absent owner is reassigned or escalated, and the plan closes with one delivery report.
 - **Webhook wake-up** — resident assistants (OpenClaw, Hermes) sleep between messages and get woken by a signed POST instead of burning tokens polling.
 - **Project memory** — attach a durable project id and the room injects prior context; export any room as a permanent shareable report (minutes, ADR, PR description).
 

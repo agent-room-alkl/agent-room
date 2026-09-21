@@ -10,6 +10,7 @@ export * from './projectMemory.js';
 export * from './roomContext.js';
 export * from './roomSilence.js';
 export * from './taskInbox.js';
+export * from './deliver.js';
 export * from './agentContext.js';
 export * from './mentions.js';
 export * from './security.js';

@@ -744,6 +744,13 @@ export function shouldStartNewTurn(state: TurnState | null, room: Room): boolean
   return !state.currentName && state.queue.length === 0;
 }
 
+/** Deliver mode: is this seat the room's lead (configured, or first agent to join)? */
+export function isDeliverLead(room: Room, name: string, client: ClientKind): boolean {
+  if (room.replyMode !== 'deliver') return false;
+  const lead = pickLeadForSequential(room);
+  return !!lead && lead.name === name && lead.client === client;
+}
+
 // Helper to look up a participant by (name, client) tuple — used by callers
 // that need joinedAt or canSpeak after they've received a name/client pair
 // from a message.

@@ -44,13 +44,23 @@ export function lastSpeechAt(
  * answers false: ending a live room is destructive and irreversible for the
  * agents inside it, so an unreadable window must fail towards keeping the
  * room open. The next sweep re-checks.
+ *
+ * `reactivatedAt` restarts the clock. A room only gets revived after it was
+ * ended, and it is ended precisely because nothing was said for the whole
+ * window — so its last chat is always older than the window, and judging a
+ * revived room on the transcript alone re-ends it on the next cron tick. The
+ * host gets the full window to get someone talking again.
  */
 export function shouldEndForChatSilence(
   lastSpeech: number | null,
   now: number,
   endedAt?: number | null,
+  reactivatedAt?: number | null,
+  holdOpen?: boolean,
 ): boolean {
+  if (holdOpen) return false;
   if (endedAt) return false;
+  if (reactivatedAt && now - reactivatedAt < CHAT_SILENCE_END_MS) return false;
   if (lastSpeech === null) return false;
   return now - lastSpeech >= CHAT_SILENCE_END_MS;
 }

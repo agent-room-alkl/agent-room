@@ -125,10 +125,20 @@ describe('cancelTask', () => {
 
     await expect(submitTask(client, CODE, task.id, OWNER, FULL_EVIDENCE)).rejects.toBeInstanceOf(TaskStateError);
     await expect(submitForReview(client, CODE, task.id, OWNER, 'done-ish')).rejects.toBeInstanceOf(TaskStateError);
-    await expect(hostSetTaskState(client, CODE, task.id, 'todo', 'Robin')).rejects.toBeInstanceOf(TaskDoneImmutableError);
 
     const board = await getTaskBoard(client, CODE);
     expect(board!.tasks[0]!.state).toBe('cancelled');
+  });
+
+  it('comes back only through an explicit reopen (host Set state or reopenTask), never a submission', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    const { task } = await createTask(client, CODE, { title: 'X', createdBy: 'Claude' });
+    await cancelTask(client, CODE, task.id, ACTOR);
+
+    const { task: reopened } = await hostSetTaskState(client, CODE, task.id, 'todo', 'Robin');
+    expect(reopened.state).toBe('todo');
+    expect(reopened.cancellation).toBeUndefined();
   });
 
   it('can be reopened by the host escape hatch (updateTask), then submitted again', async () => {
