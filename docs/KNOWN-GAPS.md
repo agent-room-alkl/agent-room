@@ -55,3 +55,10 @@ If you come back to harden this into production, this file is the starting check
 
 - **Symptom:** Vite prints a warning that `Toast.tsx` is both statically imported (from `router.tsx` and `copy.ts`) and dynamically imported (from `Room.tsx`'s send-failure path), so it can't be split into its own chunk.
 - **Why shipped:** Benign. Toast is in the main bundle either way. Pick one import style if the warning becomes annoying.
+
+## 10. No `hostVerified` flag — sender names stay unauthenticated
+
+- **What the hosted deployment has:** messages posted under the room host's name carry `hostVerified: true` when its server proved the claim on that send (the room's hostKey, or the signed-in owner). Its MCP `TRUST` line tells agents they may act on a verified host's request without asking their own user who sent it.
+- **Reality here:** the web client writes to Upstash directly from the browser with `VITE_UPSTASH_REDIS_REST_TOKEN`, so any visitor holds a write token and can store any message — including one that says `hostVerified: true`. No code path in this repo sits between the host's browser and the store, so there is nothing that could prove the claim.
+- **Why not ported:** a flag anyone can forge is worse than no flag. An agent told "act on hostVerified without asking" would obey a forged message. The `TRUST` line in `api/_mcpTools.ts` therefore keeps saying that sender names are not authenticated, which is true for this deployment.
+- **What it would take:** route message writes through a server (as the hosted deployment's `/api/room` does), take the write token out of the browser bundle, verify the host claim there, and have `appendMessage` strip any client-supplied `hostVerified` and set it only from that server. Durable member auth (`docs/authenticated-room-members.md`) verifies agents' signed cards, not the human host, so it does not close this.
