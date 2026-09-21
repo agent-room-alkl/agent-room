@@ -2,15 +2,12 @@
 // reasoning from the caller rather than from the roster: an MCP agent is
 // calling, so whoever it names must be an agent too.
 //
-// Observed 2026-09-08: an agent correctly named the human host as verifier, and
-// the task was written down as `verifierClient: "cc"` for a web participant.
-//
-// The record is simply false, and it is read in two places — verifyTask gates on
-// `task.verifierClient === undefined || task.verifierClient === caller.client`,
-// and claimTask's owner==verifier deadlock check reads the same field. reassign
-// is reachable from the web too, so the same wrong assumption can be written
-// from either side. (A human named as verifier cannot verify regardless, which
-// is why room_task now says to leave verifier unset instead of naming one.)
+// ED9-FKF-4SK, 2026-09-08. The room's only agent was told the human host could
+// hold the verifier role, did exactly that, and the task was written down as
+// `verifier: "Robin", verifierClient: "cc"`. verifyTask admits a ruling only
+// when `task.verifierClient === undefined || task.verifierClient === verifier.client`,
+// so Robin ruling from the web arrives as 'web', misses 'cc', and is refused as
+// not the verifier. The task became unverifiable by its own designated verifier.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -18,12 +15,12 @@ const room = {
   code: 'AAA-BBB-CCC',
   topic: 't',
   createdAt: 0,
-  createdBy: 'Host',
+  createdBy: 'Robin',
   status: 'active' as const,
   version: 1,
   replyMode: 'open' as const,
   participants: [
-    { name: 'Host', role: '', color: '#000', initials: 'RO', client: 'web' as const, joinedAt: 0, lastSeenAt: 0, canSpeak: true },
+    { name: 'Robin', role: '', color: '#000', initials: 'RO', client: 'web' as const, joinedAt: 0, lastSeenAt: 0, canSpeak: true },
     { name: 'Codex', role: '', color: '#002', initials: 'CO', client: 'cc' as const, joinedAt: 2, lastSeenAt: 2, canSpeak: true },
   ],
 };
@@ -47,7 +44,7 @@ describe('room_task role client kinds', () => {
   beforeEach(() => { post.mockReset(); post.mockResolvedValue({ board: { code: room.code, tasks: [], version: 1 }, task: {} }); });
 
   it('records a human verifier as web, not as an agent', async () => {
-    const sent = await task({ action: 'create', title: 'Analyze project', owner: 'Codex', verifier: 'Host' });
+    const sent = await task({ action: 'create', title: 'Analyze project', owner: 'Codex', verifier: 'Robin' });
     expect(sent.ownerClient).toBe('cc');
     // The whole point: 'cc' here is what made the task unverifiable.
     expect(sent.verifierClient).toBe('web');
@@ -72,7 +69,7 @@ describe('room_task role client kinds', () => {
   });
 
   it('resolves the same way on reassign', async () => {
-    const sent = await task({ action: 'reassign', id: 'T-01', owner: 'Codex', verifier: 'Host' });
+    const sent = await task({ action: 'reassign', id: 'T-01', owner: 'Codex', verifier: 'Robin' });
     // The requester is the MCP caller, so that one really is 'cc'.
     expect(sent.requesterClient).toBe('cc');
     expect(sent.ownerClient).toBe('cc');

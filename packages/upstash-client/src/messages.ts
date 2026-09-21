@@ -231,7 +231,10 @@ export async function appendMessage(
         decision.leadSkipped = result.leadSkipped;
         return result.state;
       }
-      return advanceTurn(cur, 'replied', room, now);
+      const closeOnResult = cur.mode === 'sequential'
+        && (role === 'lead' || role === 'wrap')
+        && /\[RESULT\]/i.test(text);
+      return advanceTurn(cur, 'replied', room, now, closeOnResult ? { result: true } : undefined);
     }
     if (cur) {
       const directed = consumeHostDirectedDetailed(cur, message.name, message.client);

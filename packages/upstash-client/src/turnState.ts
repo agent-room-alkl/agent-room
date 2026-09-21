@@ -354,13 +354,8 @@ export function newSequentialTurn(
 // `spoken` is the already-extended spoken log; its entries are tagged with
 // the round they belong to, so we can tell whether the finished round had
 // a reply. `now` anchors the next speaker's deadline.
-function advanceRoundOrEnd(
-  state: TurnState,
-  room: Room,
-  spoken: TurnSpokenEntry[],
-  now: number,
-): TurnState {
-  const ended: TurnState = {
+function endedTurn(state: TurnState, spoken: TurnSpokenEntry[]): TurnState {
+  return {
     ...state,
     currentName: undefined,
     currentClient: undefined,
@@ -371,6 +366,15 @@ function advanceRoundOrEnd(
     queue: [],
     spoken,
   };
+}
+
+function advanceRoundOrEnd(
+  state: TurnState,
+  room: Room,
+  spoken: TurnSpokenEntry[],
+  now: number,
+): TurnState {
+  const ended = endedTurn(state, spoken);
   if (state.mode !== 'sequential') return ended;
   const round = state.round ?? 1;
   const roundReplied = spoken.some(e => e.round === round && e.status === 'replied');
@@ -411,6 +415,7 @@ export function advanceTurn(
   status: TurnSpokenStatus,
   room: Room,
   now: number = Date.now(),
+  opts?: { result?: boolean },
 ): TurnState {
   if (!state.currentName || !state.currentClient || !state.currentRole) {
     return state;
@@ -423,6 +428,16 @@ export function advanceTurn(
     at: now,
     round: state.round,
   };
+  // A Lead [RESULT] closes the turn: the answer is settled, so the remaining
+  // supplements and further rounds are a cap, not a quota.
+  if (
+    state.mode === 'sequential'
+    && opts?.result
+    && status === 'replied'
+    && (state.currentRole === 'lead' || state.currentRole === 'wrap')
+  ) {
+    return endedTurn(state, [...state.spoken, finished]);
+  }
   const nextQueue = state.queue.slice();
   const next = nextQueue.shift();
   if (!next) {

@@ -343,11 +343,26 @@ export type TaskState =
 
 // The three-part proof a producer must attach to move a task to
 // 'awaiting_review'. All three text fields must be non-empty.
+/**
+ * Two halves: the artifact exists, and it was checked.
+ *
+ * The check used to be a test run and nothing else — runOutput plus a numeric
+ * exitCode, both mandatory. That shape assumes every task is code with a suite,
+ * and most room work is not: a task whose definition of done is "the .docx
+ * opens and contains the summary" has no run to paste and no exit code, so
+ * submit rejected it and the producer could only stall or invent an exitCode.
+ *
+ * So the check half is satisfied by a run OR by `checks`: the definition of
+ * done, criterion by criterion, with how each was verified. The artifact half
+ * never moves — a submission still has to show that the thing exists and what
+ * is in it, which is what makes a verifier able to re-check rather than trust.
+ */
 export interface TaskEvidence {
   fileListing: string;   // e.g. `ls -la` output proving the files exist
   fileExcerpt: string;   // head/tail of the key file proving content
-  runOutput: string;     // stdout of the test / smoke run proving it works
-  exitCode: number;      // process exit code of the run (0 = pass)
+  runOutput?: string;    // stdout of the test / smoke run proving it works
+  exitCode?: number;     // process exit code of the run (0 = pass)
+  checks?: string;       // each done-when criterion and how it was verified
   submittedBy: string;   // producer display name
   submittedClient: ClientKind;
   at: number;            // epoch ms
@@ -489,6 +504,7 @@ export interface TaskBoard {
   reliability?: Record<string, AgentReliability>;
   // Debounce bookkeeping for the board sweep's reminder sys messages.
   lastStallNudgeAt?: number;       // last "tasks not progressing" reminder
+  stallNudgeCount?: number;        // how many stall reminders have been posted
   completionAnnouncedAt?: number;  // set once when every task reached 'done'
   // epoch ms of the last agent-driven board REVIEW (the periodic ~20s "are
   // tasks done / are we drifting?" pass). Distinct from lastProgressAt: a

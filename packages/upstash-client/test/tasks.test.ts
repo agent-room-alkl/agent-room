@@ -8,6 +8,7 @@ import {
   getTaskBoard,
   allTasksDone,
   openTasks,
+  boardHasNoOpenWork,
   summarizeBoard,
   doneTasks,
   deliveredFromBoard,
@@ -16,6 +17,7 @@ import {
   boardDeliveredSection,
   reassignTask,
   reassignTaskRoles,
+  cancelTask,
   demotedAgents,
   isAgentDemoted,
   agentBlocks,
@@ -24,6 +26,7 @@ import {
   VerifierCannotClaimError,
   NotVerifierError,
   TaskStateError,
+  TaskNotFoundError,
   hostSetTaskState,
   TaskDoneImmutableError,
 } from '../src/index.js';
@@ -73,6 +76,22 @@ const VERIFIER = { name: 'GPT', client: 'cc' as const };
 describe('task board evidence gate', () => {
   beforeEach(() => vi.restoreAllMocks());
 
+  it('uses the room plan retention for task-board CAS writes', async () => {
+    const store = installFakeRedis();
+    store.set(`room:${CODE}`, JSON.stringify({ code: CODE, retentionSeconds: 90 * 24 * 60 * 60 }));
+    const client = createClient(ENV);
+
+    await createTask(client, CODE, {
+      title: 'Retained board', verifier: VERIFIER.name, verifierClient: VERIFIER.client, createdBy: 'Claude',
+    });
+
+    const calls = vi.mocked(fetch).mock.calls;
+    const evalCommand = calls
+      .map(([, init]) => JSON.parse((init as RequestInit).body as string) as string[])
+      .find(command => command[0] === 'EVAL');
+    expect(evalCommand?.[7]).toBe(String(90 * 24 * 60 * 60));
+  });
+
   it('creates a task in todo with an auto-assigned id', async () => {
     installFakeRedis();
     const client = createClient(ENV);
@@ -82,6 +101,65 @@ describe('task board evidence gate', () => {
     expect(task.id).toBe('T-01');
     expect(task.state).toBe('todo');
     expect(task.verifier).toBe('GPT');
+  });
+
+  // Requiring a run made submit unreachable for every task that is not code.
+  // Observed 2026-09-08: a task whose done-when was "the .docx opens and
+  // contains the summary" had no run to paste and no exit code to report, so
+  // the producer's only legal moves were to stall in in_progress forever or to
+  // invent an exitCode — and an invented zero is worse than saying how you
+  // actually checked.
+  it('accepts written checks in place of a run, for work that has none', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    const { task } = await createTask(client, CODE, { title: 'Write the summary', createdBy: 'Claude' });
+
+    const { task: submitted } = await submitTask(client, CODE, task.id, OWNER, {
+      fileListing: 'summary.docx',
+      fileExcerpt: '# Purpose — this project ...',
+      checks: 'opens in Word: yes. covers purpose/structure/findings/next steps: yes, sections 1-4.',
+    });
+
+    expect(submitted.state).toBe('awaiting_review');
+    expect(submitted.evidence?.checks).toContain('opens in Word');
+    // Absent, not empty: a task with no run should not carry a fabricated zero.
+    expect(submitted.evidence?.runOutput).toBeUndefined();
+    expect(submitted.evidence?.exitCode).toBeUndefined();
+  });
+
+  it('still requires the artifact half whatever the check half looks like', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    const { task } = await createTask(client, CODE, { title: 'X', createdBy: 'Claude' });
+
+    await expect(
+      submitTask(client, CODE, task.id, OWNER, { fileListing: '', fileExcerpt: 'x', checks: 'all criteria met' }),
+    ).rejects.toBeInstanceOf(EvidenceIncompleteError);
+  });
+
+  it('rejects a submission with neither a run nor checks', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    const { task } = await createTask(client, CODE, { title: 'X', createdBy: 'Claude' });
+
+    await expect(
+      submitTask(client, CODE, task.id, OWNER, { fileListing: 'a.txt', fileExcerpt: 'hello' }),
+    ).rejects.toBeInstanceOf(EvidenceIncompleteError);
+  });
+
+  // Output with no exit code, or an exit code with no output, is a claim about
+  // a run rather than a record of one.
+  it('rejects half a run even when the other half would have passed', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    const { task } = await createTask(client, CODE, { title: 'X', createdBy: 'Claude' });
+
+    await expect(
+      submitTask(client, CODE, task.id, OWNER, { fileListing: 'a.txt', fileExcerpt: 'x', runOutput: '1 passed' }),
+    ).rejects.toBeInstanceOf(EvidenceIncompleteError);
+    await expect(
+      submitTask(client, CODE, task.id, OWNER, { fileListing: 'a.txt', fileExcerpt: 'x', exitCode: 0 }),
+    ).rejects.toBeInstanceOf(EvidenceIncompleteError);
   });
 
   it('rejects a submission missing any evidence part and leaves state unchanged', async () => {
@@ -177,6 +255,150 @@ describe('task board evidence gate', () => {
   });
 });
 
+// T-03: the claim/submit state machine used to exist only in the hosted path
+// (evaluateClaimGuard / evaluateSubmitGuard). MCP + api/room.ts call claimTask
+// and submitTask directly, so every one of these was reachable in a live room.
+describe('claim/submit state machine (T-03)', () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  const OTHER = { name: 'DeepSeek', client: 'cc' as const };
+
+  async function doneTask(client: ReturnType<typeof createClient>) {
+    const { task } = await createTask(client, CODE, {
+      title: 'X', verifier: VERIFIER.name, verifierClient: VERIFIER.client, createdBy: 'Claude',
+    });
+    await claimTask(client, CODE, task.id, OWNER);
+    await submitTask(client, CODE, task.id, OWNER, FULL_EVIDENCE);
+    await verifyTask(client, CODE, task.id, VERIFIER, 'done', undefined);
+    return task.id;
+  }
+
+  it('a done task cannot be resubmitted back into review', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    const id = await doneTask(client);
+
+    await expect(
+      submitTask(client, CODE, id, OWNER, FULL_EVIDENCE),
+    ).rejects.toBeInstanceOf(TaskDoneImmutableError);
+
+    const board = await getTaskBoard(client, CODE);
+    expect(board!.tasks[0]!.state).toBe('done');
+  });
+
+  it('a cancelled task cannot be resubmitted', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    const { task } = await createTask(client, CODE, { title: 'X', createdBy: 'Claude' });
+    await cancelTask(client, CODE, task.id, { name: 'Robin', client: 'web' }, 'out of scope');
+
+    await expect(
+      submitTask(client, CODE, task.id, OWNER, FULL_EVIDENCE),
+    ).rejects.toBeInstanceOf(TaskStateError);
+
+    const board = await getTaskBoard(client, CODE);
+    expect(board!.tasks[0]!.state).toBe('cancelled');
+  });
+
+  it('a non-owner cannot submit evidence on a task someone else is working on', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    const { task } = await createTask(client, CODE, { title: 'X', createdBy: 'Claude' });
+    await claimTask(client, CODE, task.id, OWNER);
+
+    await expect(
+      submitTask(client, CODE, task.id, OTHER, FULL_EVIDENCE),
+    ).rejects.toBeInstanceOf(TaskStateError);
+
+    const board = await getTaskBoard(client, CODE);
+    expect(board!.tasks[0]!.state).toBe('in_progress');
+    expect(board!.tasks[0]!.owner).toBe('Qwen');
+  });
+
+  it('the owner can still resubmit their own awaiting_review task (case-insensitive)', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    const { task } = await createTask(client, CODE, { title: 'X', createdBy: 'Claude' });
+    await claimTask(client, CODE, task.id, OWNER);
+    await submitTask(client, CODE, task.id, OWNER, FULL_EVIDENCE);
+
+    const { task: resubmitted } = await submitTask(
+      client, CODE, task.id, { name: ' qwen ', client: 'cc' }, { ...FULL_EVIDENCE, runOutput: '2 passed' },
+    );
+    expect(resubmitted.state).toBe('awaiting_review');
+    expect(resubmitted.evidence?.runOutput).toBe('2 passed');
+  });
+
+  it('claiming does not steal a task another agent is in_progress on', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    const { task } = await createTask(client, CODE, { title: 'X', createdBy: 'Claude' });
+    await claimTask(client, CODE, task.id, OWNER);
+
+    await expect(
+      claimTask(client, CODE, task.id, OTHER),
+    ).rejects.toBeInstanceOf(TaskStateError);
+
+    const board = await getTaskBoard(client, CODE);
+    expect(board!.tasks[0]!.owner).toBe('Qwen');
+  });
+
+  it('re-claiming your own in_progress task is idempotent', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    const { task } = await createTask(client, CODE, { title: 'X', createdBy: 'Claude' });
+    await claimTask(client, CODE, task.id, OWNER);
+
+    const { task: again } = await claimTask(client, CODE, task.id, OWNER);
+    expect(again.state).toBe('in_progress');
+    expect(again.owner).toBe('Qwen');
+  });
+
+  it('claiming cannot yank a submitted task back out of review', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    const { task } = await createTask(client, CODE, {
+      title: 'X', verifier: VERIFIER.name, verifierClient: VERIFIER.client, createdBy: 'Claude',
+    });
+    await claimTask(client, CODE, task.id, OWNER);
+    await submitTask(client, CODE, task.id, OWNER, FULL_EVIDENCE);
+
+    // Even the owner may not re-claim: that would erase the pending verdict.
+    await expect(claimTask(client, CODE, task.id, OWNER)).rejects.toBeInstanceOf(TaskStateError);
+    await expect(claimTask(client, CODE, task.id, OTHER)).rejects.toBeInstanceOf(TaskStateError);
+
+    const board = await getTaskBoard(client, CODE);
+    expect(board!.tasks[0]!.state).toBe('awaiting_review');
+  });
+
+  it('an unstarted todo owned only nominally stays claimable (no board deadlock)', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    const { task } = await createTask(client, CODE, {
+      title: 'X', owner: OWNER.name, ownerClient: OWNER.client, createdBy: 'Claude',
+    });
+    expect(task.state).toBe('todo');
+
+    const { task: claimed } = await claimTask(client, CODE, task.id, OTHER);
+    expect(claimed.owner).toBe('DeepSeek');
+    expect(claimed.state).toBe('in_progress');
+  });
+
+  it('a rejected task can still be resubmitted by its owner', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    const { task } = await createTask(client, CODE, {
+      title: 'X', verifier: VERIFIER.name, verifierClient: VERIFIER.client, createdBy: 'Claude',
+    });
+    await claimTask(client, CODE, task.id, OWNER);
+    await submitTask(client, CODE, task.id, OWNER, { ...FULL_EVIDENCE, exitCode: 1 });
+    await verifyTask(client, CODE, task.id, VERIFIER, 'rejected', 'tests fail');
+
+    const { task: resubmitted } = await submitTask(client, CODE, task.id, OWNER, FULL_EVIDENCE);
+    expect(resubmitted.state).toBe('awaiting_review');
+  });
+});
+
 describe('host task state override', () => {
   beforeEach(() => vi.restoreAllMocks());
 
@@ -240,6 +462,62 @@ describe('board sweep helpers', () => {
     expect(openTasks(board)).toHaveLength(0);
   });
 
+  it('openTasks excludes rejected terminals (not actionable open work)', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    const { task: keep } = await createTask(client, CODE, {
+      title: 'Still working',
+      verifier: VERIFIER.name,
+      verifierClient: VERIFIER.client,
+      createdBy: 'C',
+    });
+    const { task: rejected } = await createTask(client, CODE, {
+      title: 'Superseded',
+      verifier: VERIFIER.name,
+      verifierClient: VERIFIER.client,
+      createdBy: 'C',
+    });
+    await claimTask(client, CODE, rejected.id, OWNER);
+    await submitTask(client, CODE, rejected.id, OWNER, FULL_EVIDENCE);
+    await verifyTask(client, CODE, rejected.id, VERIFIER, 'rejected', 'superseded by later plan');
+
+    const board = (await getTaskBoard(client, CODE))!;
+    const open = openTasks(board);
+    expect(open.map(t => t.id)).toEqual([keep.id]);
+    expect(open.every(t => t.state !== 'rejected')).toBe(true);
+    expect(board.tasks.find(t => t.id === rejected.id)?.state).toBe('rejected');
+    expect(allTasksDone(board)).toBe(false);
+    expect(boardHasNoOpenWork(board)).toBe(false); // keep still open
+  });
+
+  it('boardHasNoOpenWork is true for done+rejected boards without false allTasksDone', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    const { task: done } = await createTask(client, CODE, {
+      title: 'Shipped',
+      verifier: VERIFIER.name,
+      verifierClient: VERIFIER.client,
+      createdBy: 'C',
+    });
+    const { task: rejected } = await createTask(client, CODE, {
+      title: 'Superseded',
+      verifier: VERIFIER.name,
+      verifierClient: VERIFIER.client,
+      createdBy: 'C',
+    });
+    await claimTask(client, CODE, done.id, OWNER);
+    await submitTask(client, CODE, done.id, OWNER, FULL_EVIDENCE);
+    await verifyTask(client, CODE, done.id, VERIFIER, 'done', 'ok');
+    await claimTask(client, CODE, rejected.id, OWNER);
+    await submitTask(client, CODE, rejected.id, OWNER, FULL_EVIDENCE);
+    await verifyTask(client, CODE, rejected.id, VERIFIER, 'rejected', 'superseded');
+
+    const board = (await getTaskBoard(client, CODE))!;
+    expect(openTasks(board)).toHaveLength(0);
+    expect(boardHasNoOpenWork(board)).toBe(true);
+    expect(allTasksDone(board)).toBe(false);
+  });
+
   it('allTasksDone is false for an empty board', () => {
     expect(allTasksDone({ code: CODE, tasks: [], version: 0 })).toBe(false);
   });
@@ -253,6 +531,28 @@ describe('board sweep helpers', () => {
     expect(summary).toContain('T-01');
     expect(summary).toContain('Core model');
     expect(summary).toContain('todo');
+    expect(summary).not.toMatch(/✅ \d+ done/);
+  });
+
+  it('summarizeBoard keeps rejected history visible without counting it as open work', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    const { task } = await createTask(client, CODE, {
+      title: 'Old approach',
+      verifier: VERIFIER.name,
+      verifierClient: VERIFIER.client,
+      createdBy: 'C',
+    });
+    await claimTask(client, CODE, task.id, OWNER);
+    await submitTask(client, CODE, task.id, OWNER, FULL_EVIDENCE);
+    await verifyTask(client, CODE, task.id, VERIFIER, 'rejected', 'use plan B instead');
+
+    const board = (await getTaskBoard(client, CODE))!;
+    expect(openTasks(board)).toHaveLength(0);
+    const summary = summarizeBoard(board);
+    expect(summary).toContain('T-01 Old approach');
+    expect(summary).toContain('rejected');
+    expect(summary).toContain('use plan B instead');
     expect(summary).not.toMatch(/✅ \d+ done/);
   });
 
@@ -401,6 +701,8 @@ describe('role reassignment (owner/verifier escape hatch)', () => {
   beforeEach(() => vi.restoreAllMocks());
 
   const MOD = { name: 'Claude', client: 'cc' as const };
+  /** Default multi-agent room (Qwen + GPT + moderator). */
+  const MULTI_AGENTS = 3;
 
   it('reassigns the owner without changing state and records an audit entry', async () => {
     installFakeRedis();
@@ -408,7 +710,7 @@ describe('role reassignment (owner/verifier escape hatch)', () => {
     await createTask(client, CODE, { title: 'Build it', owner: 'Qwen', ownerClient: 'cc', verifier: 'GPT', verifierClient: 'cc', createdBy: 'Mod' });
     await claimTask(client, CODE, 'T-01', OWNER); // Qwen → in_progress
 
-    const { task } = await reassignTaskRoles(client, CODE, 'T-01', { owner: 'Gemini', ownerClient: 'cc' }, MOD, 1234);
+    const { task } = await reassignTaskRoles(client, CODE, 'T-01', { owner: 'Gemini', ownerClient: 'cc' }, MOD, 1234, MULTI_AGENTS);
     expect(task.owner).toBe('Gemini');
     expect(task.ownerClient).toBe('cc');
     expect(task.state).toBe('in_progress'); // state untouched — unlike reassignTask
@@ -423,8 +725,8 @@ describe('role reassignment (owner/verifier escape hatch)', () => {
     const client = createClient(ENV);
     await createTask(client, CODE, { title: 'X', owner: 'Qwen', ownerClient: 'cc', verifier: 'GPT', verifierClient: 'cc', createdBy: 'Mod' });
 
-    await reassignTaskRoles(client, CODE, 'T-01', { owner: 'Gemini', ownerClient: 'cc' }, MOD, 1000);
-    const { task } = await reassignTaskRoles(client, CODE, 'T-01', { verifier: 'Qwen', verifierClient: 'cc' }, MOD, 2000);
+    await reassignTaskRoles(client, CODE, 'T-01', { owner: 'Gemini', ownerClient: 'cc' }, MOD, 1000, MULTI_AGENTS);
+    const { task } = await reassignTaskRoles(client, CODE, 'T-01', { verifier: 'Qwen', verifierClient: 'cc' }, MOD, 2000, MULTI_AGENTS);
     expect(task.verifier).toBe('Qwen');
     expect(task.owner).toBe('Gemini');
     expect(task.roleHistory).toEqual([
@@ -440,30 +742,44 @@ describe('role reassignment (owner/verifier escape hatch)', () => {
     const { task } = await reassignTaskRoles(
       client, CODE, 'T-01',
       { owner: 'GPT', ownerClient: 'cc', verifier: 'Qwen', verifierClient: 'cc' },
-      MOD, 3000,
+      MOD, 3000, MULTI_AGENTS,
     );
     expect(task.owner).toBe('GPT');
     expect(task.verifier).toBe('Qwen');
     expect(task.roleHistory).toHaveLength(2);
   });
 
-  it('rejects a reassignment whose RESULT is owner == verifier (case-insensitive)', async () => {
+  it('rejects a reassignment whose RESULT is owner == verifier when multiple agents exist', async () => {
     installFakeRedis();
     const client = createClient(ENV);
     await createTask(client, CODE, { title: 'X', owner: 'Qwen', ownerClient: 'cc', verifier: 'GPT', verifierClient: 'cc', createdBy: 'Mod' });
     // New owner collides with the EXISTING verifier.
     await expect(
-      reassignTaskRoles(client, CODE, 'T-01', { owner: ' gpt ', ownerClient: 'cc' }, MOD),
+      reassignTaskRoles(client, CODE, 'T-01', { owner: ' gpt ', ownerClient: 'cc' }, MOD, Date.now(), MULTI_AGENTS),
     ).rejects.toBeInstanceOf(TaskStateError);
     // New verifier collides with the EXISTING owner.
     await expect(
-      reassignTaskRoles(client, CODE, 'T-01', { verifier: 'QWEN', verifierClient: 'cc' }, MOD),
+      reassignTaskRoles(client, CODE, 'T-01', { verifier: 'QWEN', verifierClient: 'cc' }, MOD, Date.now(), MULTI_AGENTS),
     ).rejects.toBeInstanceOf(TaskStateError);
     // Nothing moved.
     const board = (await getTaskBoard(client, CODE))!;
     expect(board.tasks[0]!.owner).toBe('Qwen');
     expect(board.tasks[0]!.verifier).toBe('GPT');
     expect(board.tasks[0]!.roleHistory).toBeUndefined();
+  });
+
+  it('allows owner == verifier when the room has exactly one eligible agent', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    await createTask(client, CODE, { title: 'Solo', owner: 'Qwen', ownerClient: 'cc', verifier: 'GPT', verifierClient: 'cc', createdBy: 'Mod' });
+    const { task } = await reassignTaskRoles(
+      client, CODE, 'T-01',
+      { owner: 'SoloAgent', ownerClient: 'cc', verifier: 'SoloAgent', verifierClient: 'cc' },
+      MOD, 5000, 1,
+    );
+    expect(task.owner).toBe('SoloAgent');
+    expect(task.verifier).toBe('SoloAgent');
+    expect(task.roleHistory).toHaveLength(2);
   });
 
   it('rejects reassignment of a done task — completed work is locked', async () => {
@@ -473,8 +789,19 @@ describe('role reassignment (owner/verifier escape hatch)', () => {
     await submitTask(client, CODE, 'T-01', OWNER, FULL_EVIDENCE);
     await verifyTask(client, CODE, 'T-01', VERIFIER, 'done', undefined);
     await expect(
-      reassignTaskRoles(client, CODE, 'T-01', { owner: 'Gemini', ownerClient: 'cc' }, MOD),
+      reassignTaskRoles(client, CODE, 'T-01', { owner: 'Gemini', ownerClient: 'cc' }, MOD, Date.now(), MULTI_AGENTS),
     ).rejects.toBeInstanceOf(TaskDoneImmutableError);
+  });
+
+  it('rejects reassignment of a rejected task — terminal work is locked', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    await createTask(client, CODE, { title: 'X', owner: OWNER.name, ownerClient: OWNER.client, verifier: VERIFIER.name, verifierClient: VERIFIER.client, createdBy: 'Mod' });
+    await submitTask(client, CODE, 'T-01', OWNER, FULL_EVIDENCE);
+    await verifyTask(client, CODE, 'T-01', VERIFIER, 'rejected', 'needs rework');
+    await expect(
+      reassignTaskRoles(client, CODE, 'T-01', { owner: 'Gemini', ownerClient: 'cc' }, MOD, Date.now(), MULTI_AGENTS),
+    ).rejects.toBeInstanceOf(TaskStateError);
   });
 
   it('rejects an empty patch and empty names', async () => {
@@ -492,6 +819,66 @@ describe('role reassignment (owner/verifier escape hatch)', () => {
     const { task } = await reassignTaskRoles(client, CODE, 'T-01', { owner: 'Qwen', ownerClient: 'cc' }, MOD);
     expect(task.owner).toBe('Qwen');
     expect(task.roleHistory).toBeUndefined();
+  });
+});
+
+describe('cancelTask (host/moderator archive to cancelled lane)', () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  it('archives a todo task to cancelled with audit metadata', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    await createTask(client, CODE, { title: 'Duplicate', createdBy: 'Mod' });
+    await createTask(client, CODE, { title: 'Keep', createdBy: 'Mod' });
+    const { task, board } = await cancelTask(client, CODE, 'T-01', { name: 'Claude', client: 'cc' }, 'duplicate', 9999);
+    expect(task.state).toBe('cancelled');
+    expect(task.cancellation).toEqual({ by: 'Claude', byClient: 'cc', at: 9999, reason: 'duplicate' });
+    expect(board.tasks).toHaveLength(2);
+    expect(board.tasks.find(t => t.id === 'T-01')?.state).toBe('cancelled');
+    expect(board.tasks.find(t => t.id === 'T-02')?.state).toBe('todo');
+  });
+
+  it('archives an in_progress task with no evidence', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    await createTask(client, CODE, { title: 'WIP', createdBy: 'Mod' });
+    await claimTask(client, CODE, 'T-01', OWNER);
+    const { task } = await cancelTask(client, CODE, 'T-01', { name: 'Host', client: 'web' });
+    expect(task.state).toBe('cancelled');
+    expect(task.owner).toBe('Qwen');
+  });
+
+  it('rejects cancelling a done task', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    await createTask(client, CODE, { title: 'X', verifier: VERIFIER.name, verifierClient: VERIFIER.client, createdBy: 'Mod' });
+    await submitTask(client, CODE, 'T-01', OWNER, FULL_EVIDENCE);
+    await verifyTask(client, CODE, 'T-01', VERIFIER, 'done', undefined);
+    await expect(cancelTask(client, CODE, 'T-01', { name: 'Host', client: 'web' })).rejects.toBeInstanceOf(TaskDoneImmutableError);
+  });
+
+  it('rejects cancelling a task with submitted evidence', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    await createTask(client, CODE, { title: 'X', verifier: VERIFIER.name, verifierClient: VERIFIER.client, createdBy: 'Mod' });
+    await submitTask(client, CODE, 'T-01', OWNER, FULL_EVIDENCE);
+    await expect(cancelTask(client, CODE, 'T-01', { name: 'Host', client: 'web' })).rejects.toBeInstanceOf(TaskStateError);
+    expect((await getTaskBoard(client, CODE))!.tasks[0]!.state).toBe('awaiting_review');
+  });
+
+  it('excludes cancelled tasks from openTasks', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    await createTask(client, CODE, { title: 'Dup', createdBy: 'Mod' });
+    await cancelTask(client, CODE, 'T-01', { name: 'Host', client: 'web' });
+    const board = (await getTaskBoard(client, CODE))!;
+    expect(openTasks(board)).toHaveLength(0);
+  });
+
+  it('rejects cancelling a missing task', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    await expect(cancelTask(client, CODE, 'T-99', { name: 'Host', client: 'web' })).rejects.toBeInstanceOf(TaskNotFoundError);
   });
 });
 
@@ -646,6 +1033,32 @@ describe('claimTask verifier-conflict guard (T-13 deadlock)', () => {
     expect(claimed.state).toBe('in_progress');
     expect(claimed.owner).toBe(OWNER.name);
     expect(claimed.verifier).toBe(VERIFIER.name);
+  });
+
+  it('rejects claiming a rejected terminal (host must reopen first)', async () => {
+    installFakeRedis();
+    const client = createClient(ENV);
+    const { task } = await createTask(client, CODE, {
+      title: 'Old approach',
+      verifier: VERIFIER.name,
+      verifierClient: VERIFIER.client,
+      createdBy: 'Claude',
+    });
+    await claimTask(client, CODE, task.id, OWNER);
+    await submitTask(client, CODE, task.id, OWNER, FULL_EVIDENCE);
+    await verifyTask(client, CODE, task.id, VERIFIER, 'rejected', 'use plan B');
+
+    await expect(
+      claimTask(client, CODE, task.id, OWNER),
+    ).rejects.toBeInstanceOf(TaskStateError);
+
+    const board = (await getTaskBoard(client, CODE))!;
+    expect(board.tasks.find(t => t.id === task.id)?.state).toBe('rejected');
+
+    // Host reopen → claim works again.
+    await hostSetTaskState(client, CODE, task.id, 'todo', 'Host');
+    const { task: reclaimed } = await claimTask(client, CODE, task.id, OWNER);
+    expect(reclaimed.state).toBe('in_progress');
   });
 });
 

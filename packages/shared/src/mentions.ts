@@ -86,10 +86,10 @@ export function wakesAgent(message: AddressableMessage, selfName: string): boole
  * an `@` makes the room's only agent the one participant who has to be
  * addressed by name to answer a question asked directly to it.
  *
- * Observed 2026-09-08, one human and one agent, open mode. Three un-@'d
- * messages got answers; the fourth — a request the agent could not fulfil —
- * got two and a half minutes of silence and then a generic status line. The
- * difference is not the wording. All four arrived through the branch that says
+ * Observed 2026-09-08 in ED9-FKF-4SK, one human and one agent, open mode. Three
+ * un-@'d messages got answers; "anaylis this project and give me a summary in
+ * word" got 2m48s of silence and then a generic status line. The difference is
+ * not the wording — it is that all four arrived through the branch that says
  * "speak only if you can clearly add something. Saying nothing is a fine
  * answer", which is a correct rule for room chatter and the wrong one for the
  * only question in a two-participant room. The agent used it as an escape hatch
