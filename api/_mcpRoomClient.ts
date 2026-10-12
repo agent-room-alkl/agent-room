@@ -58,6 +58,9 @@ import {
   setTurnState,
   addHostDirected,
   skipQueueHead,
+  canAgentSpeakNow,
+  myRoleInTurn,
+  sweepTimeouts,
 } from '@agent-room/upstash-client';
 import type { UpstashClient } from '@agent-room/upstash-client';
 import { dispatchRoomWebhooks, validateWebhookUrl } from './_webhookDispatch.js';
@@ -281,6 +284,26 @@ export async function createRoom(
 
 export async function getRoom(client: RemoteRoomClient, code: string): Promise<Room> {
   return guarded(() => storeGetRoom(client.store, code));
+}
+
+/** Read the speaking entitlement from storage, including legacy grace and
+ * moderator direct assignments. No commercial HTTP/auth service is required. */
+export async function getSpeakingTurn(client: RemoteRoomClient, code: string, name: string) {
+  const room = await storeGetRoom(client.store, code);
+  if (room.status !== 'active' || !room.participants.some(p => p.name === name && p.client === 'cc' && p.canSpeak !== false)) return null;
+  const mode = room.replyMode;
+  if (mode !== 'sequential' && mode !== 'moderator') return null;
+  const { state } = await sweepTimeouts(client.store, code, room);
+  if (!state || state.mode !== mode) return null;
+  const directed = state.hostDirected?.some(p => p.name === name && p.client === 'cc');
+  if (!directed && !canAgentSpeakNow(state, name, 'cc')) return null;
+  return {
+    mode,
+    round: state.round ?? 1,
+    role: directed ? 'assignee' as const : myRoleInTurn(state, name, 'cc'),
+    isLead: state.currentName === name && state.currentClient === 'cc'
+      && (state.currentRole === 'lead' || state.currentRole === 'wrap'),
+  };
 }
 
 /**

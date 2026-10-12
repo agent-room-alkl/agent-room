@@ -43,7 +43,7 @@ export interface TaskInbox {
 
 const OPEN_OWNER_STATES = new Set(['todo', 'in_progress', 'rejected', 'blocked']);
 
-const CREATE_CALL = 'room_task({ action: "create", title, dod }) then action: "claim".';
+const CREATE_CALL = 'room_task({ action: "create", title, dod }) then action: "claim" after roomPolicy planning and role requirements are satisfied.';
 
 /** Said only when the room addressed this agent and the board holds nothing for it. */
 const OPEN_ONE =

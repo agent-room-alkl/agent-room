@@ -37,3 +37,5 @@ jobs:
         run: npm run migrate:postgres -w packages/room-persistence
       - name: Workspace rollup with Postgres integration
         run: npm test
+      - name: HTTP MCP protocol regression tests
+        run: npm run test:api

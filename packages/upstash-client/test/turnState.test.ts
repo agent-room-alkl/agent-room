@@ -188,14 +188,29 @@ describe('advanceTurn', () => {
     expect(third.currentName).toBe('B');
   });
 
-  it('ends the turn when the Lead replies with [RESULT] — later phases are a cap, not a quota', () => {
+  it('does not let the opening Lead RESULT skip the first peer pass', () => {
     const r = room();
     const start = newSequentialTurn(r, 100, 1000)!;
     const after = advanceTurn(start, 'replied', r, 2000, { result: true });
-    expect(after.currentName).toBeUndefined();
-    expect(after.queue).toEqual([]);
+    expect(after.currentName).toBe('A');
+    expect(after.queue.map(p => p.name)).toEqual(['B']);
     expect(after.round).toBe(1);
     expect(after.spoken.at(-1)).toMatchObject({ name: 'Lead', status: 'replied' });
+  });
+
+  it('lets the lead close after every peer has had a pass', () => {
+    const r = room();
+    let state = newSequentialTurn(r, 100, 1000)!;
+    state = advanceTurn(state, 'replied', r, 2000);
+    state = advanceTurn(state, 'replied', r, 3000);
+    state = advanceTurn(state, 'no_addition', r, 4000);
+    expect(state.round).toBe(2);
+    expect(advanceTurn(state, 'replied', r, 5000, { result: true }).currentName).toBeUndefined();
+  });
+
+  it('lets a solo lead close its first answer', () => {
+    const r = room({ participants: [part('Lead', 'cc', 10)] });
+    expect(advanceTurn(newSequentialTurn(r, 1, 1000)!, 'replied', r, 2000, { result: true }).currentName).toBeUndefined();
   });
 
   it('ignores the [RESULT] flag from a supplement', () => {
