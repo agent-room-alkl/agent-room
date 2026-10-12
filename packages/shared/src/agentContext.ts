@@ -6,11 +6,11 @@
 // other adapter that briefs a model — a system prompt, a skill — must carry
 // the same words. Two agents on different clients, or on two deployments of
 // Agent Room, must read identical text or they play by different rules in the
-// same room. Kept byte-identical to the hosted deployment's copy on purpose.
+// same room. Summaries must match this deployment's actual turn machine.
 
 // Bump when the canonical policy WORDING below changes, so clients and
 // analytics can tell which behavior contract an agent was briefed under.
-export const ROOM_POLICY_VERSION = 6;
+export const ROOM_POLICY_VERSION = 7;
 
 // Consensus/debate are round-based multi-agent modes. They USED to be a
 // hosted-only orchestration that MCP agents were not part of (the 2026-07-08
@@ -90,9 +90,9 @@ export function roomPolicySummary(
 ): string {
   // Historical stored rooms may still have replyMode === 'game'; treat as open.
   const mode = replyMode === 'game' ? 'open' : (replyMode ?? 'open');
-  const base = 'Tasks are evidence-gated: real work gets a board task with an owner and a DIFFERENT verifier; a task is done only when its verifier rules done.';
+  const base = 'Mode planning and role boundaries take precedence over general delivery guidance. Tasks are evidence-gated: real work gets a board task with an owner and a DIFFERENT verifier; a task is done only when its verifier rules done.';
   if (mode === 'sequential') {
-    return `[policy v${ROOM_POLICY_VERSION}] Sequential mode: lead answers first, peers add ordered deltas (SUPPORT / ADD / CHALLENGE / QUESTION / SKIP), then the lead may close with [RESULT] as soon as the answer is settled — at most one extra APPROVE/PATCH pass. Five phases are a cap, not a quota. Speak only when you hold the floor. ${base}`;
+    return `[policy v${ROOM_POLICY_VERSION}] Sequential mode: the lead answers first, then every peer gets a turn in join order. Later rounds refine the answer until nobody adds anything, with a maximum of ten rounds. After the first peer pass the lead may close with [RESULT] when the answer is settled; a solo lead may close immediately. Speak only when you hold the floor. ${base}`;
   }
   if (mode === 'moderator') {
     if (role === 'moderator') {
@@ -106,5 +106,19 @@ export function roomPolicySummary(
   if (mode === 'debate') {
     return `[policy v${ROOM_POLICY_VERSION}] Debate mode: connected agents take strict turns in join order. Round 1 — state your own position on the motion, once. Round 2 — rebut the strongest opposing argument already posted, and concede what the evidence supports. Then the first agent writes the verdict. Speak only when you hold the floor. ${base}`;
   }
-  return `[policy v${ROOM_POLICY_VERSION}] Open mode: anyone may speak. Bring your own angle; if a teammate already shipped the same deliverable, [SKIP] or review it — do not re-implement. Reply when mentioned, assigned, or clearly adding value — do not answer every message. ${base}`;
+  return `[policy v${ROOM_POLICY_VERSION}] Open mode: anyone may speak. Discuss the goal, approach, and role split before claiming or implementing new work; once agreed, execute without repeating the planning. Bring your own angle; if a teammate already shipped the same deliverable, [SKIP] or review it — do not re-implement. Reply when mentioned, assigned, or clearly adding value — do not answer every message. ${base}`;
+}
+
+/** Brief the current speaker against the open-source round-robin contract. */
+export function roundFloorBrief(mode: string, round: number, isLead: boolean): string | undefined {
+  if (mode === 'sequential') {
+    if (isLead) return round <= 1
+      ? 'YOUR TURN — give the opening answer. Let every peer have its first pass before closing with [RESULT]; a solo room may close now.'
+      : 'YOUR TURN — synthesize the peer replies. Keep unresolved objections in a clearly labeled section in the user\'s language. End with [RESULT] if the answer is settled; otherwise state what still needs checking.';
+    return 'YOUR TURN — add one concrete point, correction, or question to the lead\'s answer. Do not repeat the answer. If nothing needs adding, send __no_addition__ to yield the floor.';
+  }
+  if (mode === 'moderator') return isLead
+    ? 'YOUR TURN AS MODERATOR — assign work by name, unblock the agents, and synthesize their results; follow roomPolicy role boundaries.'
+    : 'ASSIGNED TURN — deliver the work the moderator assigned to you, then return to listening.';
+  return undefined;
 }
